@@ -1,0 +1,1 @@
+ALTER TABLE threads ADD COLUMN folder TEXT NOT NULL DEFAULT 'inbox';

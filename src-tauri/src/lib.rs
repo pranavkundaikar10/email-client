@@ -44,6 +44,8 @@ pub fn run() {
             agent::analyze_thread,
             agent::analyze_inbox,
             agent::get_auto_analysis_candidates,
+            agent::get_review_queue,
+            agent::record_review_decision,
             agent::get_digest,
             agent::get_thread_analysis,
         ])

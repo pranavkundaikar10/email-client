@@ -24,6 +24,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [activeView, setActiveView] = useState<View>("inbox");
   const [, setSyncing] = useState(false);
   const syncedFolders = useRef(new Set<string>());
+  const backgroundAnalysisRunning = useRef(false);
   const addToast = useAppStore((s) => s.addToast);
   const [composeOpen, setComposeOpen] = useState(false);
   const [splitsOpen, setSplitsOpen] = useState(false);
@@ -90,12 +91,36 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   }, { enableOnFormTags: false });
 
   useEffect(() => {
+    async function processOneRecentEmail() {
+      // Keep local inference deliberately low-impact: one email per sync
+      // cycle, never in parallel, and only for mail received today.
+      if (backgroundAnalysisRunning.current) return;
+      backgroundAnalysisRunning.current = true;
+      try {
+        const [candidate] = await api.getAutoAnalysisCandidates(1);
+        if (!candidate) return;
+
+        // BODY.PEEK fetches the content without changing Gmail's read state.
+        await api.fetchMessageBody(email, candidate.message_id);
+        await api.analyzeThread(candidate.thread_id);
+        queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
+        queryClient.invalidateQueries({ queryKey: ["digest"] });
+      } catch (err) {
+        // Background triage is opportunistic. Manual Analyze remains available
+        // and avoids interrupting the user with repeated transient errors.
+        console.warn("Background email analysis skipped:", err);
+      } finally {
+        backgroundAnalysisRunning.current = false;
+      }
+    }
+
     async function sync() {
       setSyncing(true);
       try {
         await api.syncInbox(email);
         queryClient.invalidateQueries({ queryKey: ["threads"] });
         queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+        await processOneRecentEmail();
       } catch (err) {
         addToast(`Sync failed: ${String(err)}`);
       } finally {

@@ -81,6 +81,11 @@ export interface DigestItem {
   deadline: string | null;
 }
 
+export interface AutoAnalysisCandidate {
+  thread_id: string;
+  message_id: string;
+}
+
 export const api = {
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
@@ -155,6 +160,9 @@ export const api = {
 
   analyzeInbox: (model?: string, baseUrl?: string, limit?: number) =>
     invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit }),
+
+  getAutoAnalysisCandidates: (limit = 1) =>
+    invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),
 
   getDigest: (limit = 50) =>
     invoke<DigestItem[]>("get_digest", { limit }),

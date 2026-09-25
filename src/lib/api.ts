@@ -86,6 +86,19 @@ export interface AutoAnalysisCandidate {
   message_id: string;
 }
 
+export interface ReviewItem {
+  thread_id: string;
+  subject: string;
+  from_name: string;
+  from_email: string;
+  importance: number;
+  category: AnalysisCategory | string;
+  summary: string;
+  action_items: string;
+  deadline: string | null;
+  is_actionable: boolean;
+}
+
 export const api = {
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
@@ -163,6 +176,12 @@ export const api = {
 
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),
+
+  getReviewQueue: (limit = 50) =>
+    invoke<ReviewItem[]>("get_review_queue", { limit }),
+
+  recordReviewDecision: (threadId: string, decision: "keep" | "follow_up" | "archived") =>
+    invoke<void>("record_review_decision", { threadId, decision }),
 
   getDigest: (limit = 50) =>
     invoke<DigestItem[]>("get_digest", { limit }),

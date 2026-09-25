@@ -43,6 +43,21 @@ pub struct AutoAnalysisCandidate {
     pub message_id: String,
 }
 
+/// An analyzed email waiting for the user's explicit triage decision.
+#[derive(Debug, Serialize, FromRow)]
+pub struct ReviewItem {
+    pub thread_id: String,
+    pub subject: String,
+    pub from_name: String,
+    pub from_email: String,
+    pub importance: i64,
+    pub category: String,
+    pub summary: String,
+    pub action_items: String,
+    pub deadline: Option<String>,
+    pub is_actionable: bool,
+}
+
 /// What we ask the model to return. `format: "json"` on the Ollama request
 /// constrains output to valid JSON; this struct is what we parse it into.
 #[derive(Debug, Deserialize)]
@@ -351,6 +366,75 @@ pub async fn get_auto_analysis_candidates(
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())
+}
+
+/// The review queue contains today's analyzed inbox threads until the user
+/// explicitly keeps, follows up on, or archives them.
+#[tauri::command]
+pub async fn get_review_queue(
+    pool: tauri::State<'_, SqlitePool>,
+    limit: Option<i64>,
+) -> Result<Vec<ReviewItem>, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 100);
+    let today_start = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
+        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
+
+    sqlx::query_as::<_, ReviewItem>(
+        r#"
+        SELECT a.thread_id, t.subject,
+               COALESCE(m.from_name, '') AS from_name,
+               COALESCE(m.from_email, '') AS from_email,
+               a.importance, a.category, a.summary, a.action_items,
+               a.deadline, a.is_actionable
+        FROM email_analysis a
+        JOIN threads t ON t.id = a.thread_id
+        LEFT JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        LEFT JOIN email_reviews r ON r.thread_id = t.id
+        WHERE t.folder = 'inbox' AND t.archived = 0
+          AND t.last_message_at >= ? AND r.thread_id IS NULL
+        ORDER BY a.importance DESC, t.last_message_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(today_start)
+    .bind(limit)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn record_review_decision(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+    decision: String,
+) -> Result<(), String> {
+    if !matches!(decision.as_str(), "keep" | "follow_up" | "archived") {
+        return Err("invalid review decision".to_string());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO email_reviews (thread_id, decision, reviewed_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+            decision = excluded.decision,
+            reviewed_at = excluded.reviewed_at
+        "#,
+    )
+    .bind(thread_id)
+    .bind(decision)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 /// Digest for the panel: analyzed, actionable-first, most important first,

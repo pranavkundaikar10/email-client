@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
@@ -32,6 +33,14 @@ pub struct DigestItem {
     pub summary: String,
     pub action_items: String,
     pub deadline: Option<String>,
+}
+
+/// The newest message in a thread that can be safely processed by the
+/// low-priority background triage queue.
+#[derive(Debug, Serialize, FromRow)]
+pub struct AutoAnalysisCandidate {
+    pub thread_id: String,
+    pub message_id: String,
 }
 
 /// What we ask the model to return. `format: "json"` on the Ollama request
@@ -305,6 +314,43 @@ pub async fn analyze_inbox(
     }
 
     Ok(results)
+}
+
+/// Return recent inbox messages that have not yet been analyzed. The client
+/// deliberately takes only one at a time so local inference never competes
+/// with the UI or starts multiple Ollama requests concurrently.
+#[tauri::command]
+pub async fn get_auto_analysis_candidates(
+    pool: tauri::State<'_, SqlitePool>,
+    limit: Option<i64>,
+) -> Result<Vec<AutoAnalysisCandidate>, String> {
+    let limit = limit.unwrap_or(1).clamp(1, 5);
+    let today_start = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
+        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
+
+    sqlx::query_as::<_, AutoAnalysisCandidate>(
+        r#"
+        SELECT t.id AS thread_id, m.id AS message_id
+        FROM threads t
+        JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        WHERE t.folder = 'inbox' AND t.archived = 0
+          AND t.last_message_at >= ?
+          AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+        ORDER BY t.last_message_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(today_start)
+    .bind(limit)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Digest for the panel: analyzed, actionable-first, most important first,

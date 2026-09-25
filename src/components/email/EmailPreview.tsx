@@ -313,6 +313,17 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     onError: (err) => addToast(`Could not save review decision: ${String(err)}`),
   });
 
+  const { mutate: deleteFromReview, isPending: deletingFromReview } = useMutation({
+    mutationFn: (threadId: string) => api.deleteThread(threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      addToast("Moved to Gmail Trash");
+      selectNextOrPrev();
+    },
+    onError: (err) => addToast(`Could not delete email: ${String(err)}`),
+  });
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
@@ -446,25 +457,33 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
             </div>
             <div className="flex items-center gap-2">
               <button
-                disabled={savingReview}
+                disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "follow_up" })}
                 className="rounded-md px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"
               >
                 Follow up
               </button>
               <button
-                disabled={savingReview}
+                disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "keep" })}
                 className="rounded-md px-2.5 py-1.5 text-xs text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"
               >
                 Keep
               </button>
               <button
-                disabled={savingReview}
+                disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "archived" })}
                 className="rounded-md bg-gray-900 px-3 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-40"
               >
                 Archive
+              </button>
+              <button
+                disabled={savingReview || deletingFromReview}
+                onClick={() => deleteFromReview(reviewItem.thread_id)}
+                title="Move email to Gmail Trash"
+                className="rounded-md px-2 py-1.5 text-xs text-red-500 hover:bg-red-50 disabled:opacity-40"
+              >
+                <Trash2 size={14} />
               </button>
             </div>
           </div>

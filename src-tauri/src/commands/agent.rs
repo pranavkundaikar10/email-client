@@ -457,8 +457,14 @@ pub async fn get_auto_analysis_candidates(
 pub async fn get_review_queue(
     pool: tauri::State<'_, SqlitePool>,
     limit: Option<i64>,
+    sort: Option<String>,
 ) -> Result<Vec<ReviewItem>, String> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
+    let order_by = match sort.as_deref() {
+        Some("oldest") => "t.last_message_at ASC",
+        Some("newest") => "t.last_message_at DESC",
+        _ => "a.importance DESC, t.last_message_at DESC",
+    };
     let today_start = chrono::Local::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -466,8 +472,7 @@ pub async fn get_review_queue(
         .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
 
-    sqlx::query_as::<_, ReviewItem>(
-        r#"
+    let query = r#"
         SELECT a.thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
                t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
                COALESCE(m.from_name, '') AS from_name,
@@ -482,10 +487,12 @@ pub async fn get_review_queue(
         LEFT JOIN email_reviews r ON r.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND t.last_message_at >= ? AND r.thread_id IS NULL
-        ORDER BY a.importance DESC, t.last_message_at DESC
+        ORDER BY {order_by}
         LIMIT ?
-        "#,
-    )
+        "#
+        .replace("{order_by}", order_by);
+
+    sqlx::query_as::<_, ReviewItem>(&query)
     .bind(today_start)
     .bind(limit)
     .fetch_all(pool.inner())

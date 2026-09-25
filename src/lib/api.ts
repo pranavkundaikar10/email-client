@@ -189,8 +189,8 @@ export const api = {
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),
 
-  getReviewQueue: (limit = 50) =>
-    invoke<ReviewItem[]>("get_review_queue", { limit }),
+  getReviewQueue: (limit = 50, sort: "priority" | "newest" | "oldest" = "priority") =>
+    invoke<ReviewItem[]>("get_review_queue", { limit, sort }),
 
   recordReviewDecision: (threadId: string, decision: "keep" | "follow_up" | "archived") =>
     invoke<void>("record_review_decision", { threadId, decision }),

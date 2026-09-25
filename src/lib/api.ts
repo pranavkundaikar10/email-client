@@ -44,6 +44,43 @@ export interface Split {
   rules: SplitRule[];
 }
 
+export type AnalysisCategory =
+  | "interview"
+  | "assessment"
+  | "offer"
+  | "rejection"
+  | "application_update"
+  | "networking"
+  | "deadline"
+  | "newsletter"
+  | "other";
+
+export interface ThreadAnalysis {
+  thread_id: string;
+  is_actionable: boolean;
+  importance: number; // 1-5
+  category: AnalysisCategory | string;
+  summary: string;
+  action_items: string; // JSON-encoded string[]
+  deadline: string | null;
+  model: string;
+  analyzed_at: string;
+}
+
+export interface DigestItem {
+  thread_id: string;
+  subject: string;
+  from_name: string;
+  from_email: string;
+  unread: boolean;
+  is_actionable: boolean;
+  importance: number;
+  category: AnalysisCategory | string;
+  summary: string;
+  action_items: string; // JSON-encoded string[]
+  deadline: string | null;
+}
+
 export const api = {
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
@@ -59,6 +96,9 @@ export const api = {
 
   markThreadRead: (threadId: string) =>
     invoke<void>("mark_thread_read", { threadId: threadId }),
+
+  markThreadUnread: (threadId: string) =>
+    invoke<void>("mark_thread_unread", { threadId: threadId }),
 
   archiveThread: (threadId: string) =>
     invoke<void>("archive_thread", { threadId: threadId }),
@@ -107,6 +147,20 @@ export const api = {
 
   recategorizeThreads: () =>
     invoke<void>("recategorize_threads"),
+
+  // Agent — local-LLM email triage. `model`/`baseUrl` are optional overrides
+  // for the Ollama model name / server URL (defaults live on the Rust side).
+  analyzeThread: (threadId: string, model?: string, baseUrl?: string) =>
+    invoke<ThreadAnalysis>("analyze_thread", { threadId, model, baseUrl }),
+
+  analyzeInbox: (model?: string, baseUrl?: string, limit?: number) =>
+    invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit }),
+
+  getDigest: (limit = 50) =>
+    invoke<DigestItem[]>("get_digest", { limit }),
+
+  getThreadAnalysis: (threadId: string) =>
+    invoke<ThreadAnalysis | null>("get_thread_analysis", { threadId }),
 
   sendEmail: (req: {
     from: string;

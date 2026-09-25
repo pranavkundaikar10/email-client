@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
 import { useEffect, useRef, useState } from "react";
-import { Archive, Reply, Trash2 } from "lucide-react";
+import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -152,6 +152,87 @@ function MessageCard({
   );
 }
 
+function parseActionItems(json: string): string[] {
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function severityForImportance(importance: number): string {
+  if (importance >= 5) return "Critical";
+  if (importance >= 4) return "High";
+  if (importance >= 3) return "Medium";
+  return "Low";
+}
+
+// Shows the agent's extracted summary/action items for the open thread, if
+// it's already been analyzed (via the Digest scan). Doesn't trigger analysis
+// itself — that stays a deliberate, batched action so an 8B local model
+// isn't called on every click.
+function AnalysisBanner({ threadId }: { threadId: string }) {
+  const { data: analysis } = useQuery({
+    queryKey: ["thread_analysis", threadId],
+    queryFn: () => api.getThreadAnalysis(threadId),
+  });
+
+  if (!analysis) return null;
+  const items = parseActionItems(analysis.action_items);
+  const severity = severityForImportance(analysis.importance);
+  const severityStyle = analysis.importance >= 5
+    ? "text-red-600 bg-red-50 ring-red-100"
+    : analysis.importance >= 4
+      ? "text-amber-700 bg-amber-50 ring-amber-100"
+      : analysis.importance >= 3
+        ? "text-blue-700 bg-blue-50 ring-blue-100"
+        : "text-gray-500 bg-gray-100 ring-gray-200";
+
+  return (
+    <div className={`mx-6 mt-4 mb-1 px-4 py-3 rounded-lg border ${
+      analysis.is_actionable
+        ? "bg-indigo-50/60 border-indigo-100"
+        : "bg-gray-50 border-gray-100"
+    }`}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-500">
+            <Sparkles size={12} />
+            AI analysis
+          </div>
+          <p className={`mt-1 text-xs font-medium leading-relaxed ${
+            analysis.is_actionable ? "text-indigo-800" : "text-gray-700"
+          }`}>
+            {analysis.summary || (analysis.is_actionable ? "Action needed" : "No action needed")}
+          </p>
+        </div>
+        <div
+          title={`Importance ${analysis.importance} out of 5 — ${severity}`}
+          className={`flex flex-shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-semibold ring-1 ${severityStyle}`}
+        >
+          <span>{severity}</span>
+          <span className="h-3 w-px bg-current opacity-20" />
+          <span>{analysis.importance}/5</span>
+        </div>
+      </div>
+      {analysis.deadline && (
+        <p className="mt-1.5 text-[11px] font-medium text-red-600">Due {analysis.deadline}</p>
+      )}
+      {items.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {items.map((it, i) => (
+            <li key={i} className="text-xs text-gray-700 flex gap-1.5">
+              <span className="text-indigo-300">•</span>
+              {it}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function EmailPreview({ email }: { email: string }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
@@ -183,6 +264,26 @@ export default function EmailPreview({ email }: { email: string }) {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
     },
     onError: (err) => addToast(`Delete failed: ${String(err)}`),
+  });
+
+  const { mutate: markUnread, isPending: markingUnread } = useMutation({
+    mutationFn: (threadId: string) => api.markThreadUnread(threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+      addToast("Marked unread locally");
+    },
+    onError: (err) => addToast(`Could not mark unread: ${String(err)}`),
+  });
+
+  const { mutate: analyzeThread, isPending: analyzing } = useMutation({
+    mutationFn: (threadId: string) => api.analyzeThread(threadId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["thread_analysis", selectedThreadId] });
+      queryClient.invalidateQueries({ queryKey: ["digest"] });
+      addToast("Email analyzed");
+    },
+    onError: (err) => addToast(`Analysis failed: ${String(err)}`),
   });
 
   useEffect(() => {
@@ -271,6 +372,23 @@ export default function EmailPreview({ email }: { email: string }) {
         <h2 className="text-sm font-semibold text-gray-900 truncate">{subject}</h2>
         <div className="flex items-center gap-1">
           <button
+            onClick={() => { if (selectedThreadId) analyzeThread(selectedThreadId); }}
+            disabled={analyzing || archiving || deleting}
+            title="Analyze this email"
+            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 transition-colors disabled:opacity-40"
+          >
+            <Sparkles size={14} />
+            {analyzing ? "Analyzing…" : "Analyze"}
+          </button>
+          <button
+            onClick={() => { if (selectedThreadId) markUnread(selectedThreadId); }}
+            disabled={markingUnread || archiving || deleting}
+            title="Mark unread locally"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-40"
+          >
+            <MailOpen size={15} />
+          </button>
+          <button
             onClick={() => { if (selectedThreadId) archive(selectedThreadId); }}
             disabled={archiving || deleting}
             title="Archive (E)"
@@ -288,6 +406,9 @@ export default function EmailPreview({ email }: { email: string }) {
           </button>
         </div>
       </div>
+
+      {/* AI-extracted action items, if this thread has been analyzed */}
+      <AnalysisBanner threadId={selectedThreadId} />
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-5">

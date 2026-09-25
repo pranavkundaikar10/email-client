@@ -1,0 +1,358 @@
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, SqlitePool};
+
+const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+const DEFAULT_MODEL: &str = "gemma4:e4b";
+const MAX_BODY_CHARS: usize = 1800;
+
+#[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
+pub struct AnalysisRow {
+    pub thread_id: String,
+    pub is_actionable: bool,
+    pub importance: i64,
+    pub category: String,
+    pub summary: String,
+    pub action_items: String, // JSON array, kept as string like `rules`/`label_ids` elsewhere in this codebase
+    pub deadline: Option<String>,
+    pub model: String,
+    pub analyzed_at: String,
+}
+
+/// Enriched row joined with thread metadata, for the digest panel.
+#[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
+pub struct DigestItem {
+    pub thread_id: String,
+    pub subject: String,
+    pub from_name: String,
+    pub from_email: String,
+    pub unread: bool,
+    pub is_actionable: bool,
+    pub importance: i64,
+    pub category: String,
+    pub summary: String,
+    pub action_items: String,
+    pub deadline: Option<String>,
+}
+
+/// What we ask the model to return. `format: "json"` on the Ollama request
+/// constrains output to valid JSON; this struct is what we parse it into.
+#[derive(Debug, Deserialize)]
+struct ModelPayload {
+    #[serde(default)]
+    is_actionable: bool,
+    #[serde(default = "default_importance")]
+    importance: i64,
+    #[serde(default = "default_category")]
+    category: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    action_items: Vec<String>,
+    #[serde(default)]
+    deadline: Option<String>,
+}
+
+fn default_importance() -> i64 { 3 }
+fn default_category() -> String { "other".to_string() }
+
+#[derive(Serialize)]
+struct OllamaRequest<'a> {
+    model: &'a str,
+    messages: Vec<OllamaMessage<'a>>,
+    format: &'a str,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct OllamaMessage<'a> {
+    role: &'a str,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct OllamaResponse {
+    message: OllamaResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct OllamaResponseMessage {
+    content: String,
+}
+
+fn system_prompt() -> &'static str {
+    r#"You are an assistant that triages a job-seeker's email inbox. For the
+single email given, decide whether it needs action and extract concrete next
+steps. Categories: interview, assessment, offer, rejection, application_update,
+networking, deadline, newsletter, other.
+
+Respond with ONLY a JSON object, no other text, matching exactly:
+{
+  "is_actionable": boolean,
+  "importance": integer 1-5 (5 = urgent, e.g. interview invite or offer with a deadline; 1 = fluff/newsletter),
+  "category": one of the categories above,
+  "summary": "one sentence, under 25 words",
+  "action_items": ["short imperative next step", "..."],
+  "deadline": "YYYY-MM-DD" or null if none stated
+}
+If the email is a newsletter, marketing, or has nothing to act on, set
+is_actionable to false, importance to 1 or 2, and action_items to []."#
+}
+
+fn strip_html(html: &str) -> String {
+    html2text::from_read(html.as_bytes(), 100)
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect::<String>() + "…"
+}
+
+fn build_user_prompt(from_name: &str, from_email: &str, subject: &str, body: &str) -> String {
+    format!(
+        "From: {} <{}>\nSubject: {}\n\nBody:\n{}",
+        from_name,
+        from_email,
+        subject,
+        truncate(body.trim(), MAX_BODY_CHARS)
+    )
+}
+
+async fn call_model(
+    base_url: &str,
+    model: &str,
+    user_prompt: String,
+) -> Result<ModelPayload, String> {
+    let client = reqwest::Client::new();
+    let req = OllamaRequest {
+        model,
+        messages: vec![
+            OllamaMessage { role: "system", content: system_prompt().to_string() },
+            OllamaMessage { role: "user", content: user_prompt },
+        ],
+        format: "json",
+        stream: false,
+    };
+
+    let resp = client
+        .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("could not reach Ollama at {}: {}", base_url, e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Ollama returned {}: {}", status, body));
+    }
+
+    let parsed: OllamaResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("unexpected Ollama response shape: {}", e))?;
+
+    serde_json::from_str::<ModelPayload>(&parsed.message.content)
+        .map_err(|e| format!("model did not return valid JSON ({}): {}", e, parsed.message.content))
+}
+
+/// Fetch the most recent message in a thread and reduce it to plain text
+/// suitable for prompting, falling back to the thread snippet if no message
+/// body has been fetched yet.
+async fn latest_message_text(
+    pool: &SqlitePool,
+    thread_id: &str,
+) -> Result<(String, String, String, String), String> {
+    // (from_name, from_email, subject, body)
+    let row: Option<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT from_name, from_email, subject, body_text, body_html
+        FROM messages
+        WHERE thread_id = ?
+        ORDER BY sent_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some((from_name, from_email, subject, body_text, body_html)) = row else {
+        return Err(format!("no messages found for thread {}", thread_id));
+    };
+
+    let body = match (body_text, body_html) {
+        (Some(t), _) if !t.trim().is_empty() => t,
+        (_, Some(h)) if !h.trim().is_empty() => strip_html(&h),
+        _ => {
+            let snippet: String = sqlx::query_scalar("SELECT snippet FROM threads WHERE id = ?")
+                .bind(thread_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            snippet
+        }
+    };
+
+    Ok((from_name, from_email, subject, body))
+}
+
+/// Analyze a single thread and upsert the result into `email_analysis`.
+#[tauri::command]
+pub async fn analyze_thread(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> Result<AnalysisRow, String> {
+    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+
+    let (from_name, from_email, subject, body) =
+        latest_message_text(pool.inner(), &thread_id).await?;
+
+    let prompt = build_user_prompt(&from_name, &from_email, &subject, &body);
+    let payload = call_model(&base_url, &model, prompt).await?;
+
+    let action_items_json =
+        serde_json::to_string(&payload.action_items).unwrap_or_else(|_| "[]".to_string());
+    let importance = payload.importance.clamp(1, 5);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    sqlx::query(
+        r#"
+        INSERT INTO email_analysis
+            (thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+            is_actionable = excluded.is_actionable,
+            importance    = excluded.importance,
+            category      = excluded.category,
+            summary       = excluded.summary,
+            action_items  = excluded.action_items,
+            deadline      = excluded.deadline,
+            model         = excluded.model,
+            analyzed_at   = excluded.analyzed_at
+        "#,
+    )
+    .bind(&thread_id)
+    .bind(payload.is_actionable)
+    .bind(importance)
+    .bind(&payload.category)
+    .bind(&payload.summary)
+    .bind(&action_items_json)
+    .bind(&payload.deadline)
+    .bind(&model)
+    .bind(&now)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(AnalysisRow {
+        thread_id,
+        is_actionable: payload.is_actionable,
+        importance,
+        category: payload.category,
+        summary: payload.summary,
+        action_items: action_items_json,
+        deadline: payload.deadline,
+        model,
+        analyzed_at: now,
+    })
+}
+
+/// Analyze every unread inbox thread that is new or has changed since it was
+/// last analyzed. Runs sequentially (one Ollama call per email) and skips
+/// threads that fail rather than aborting the whole batch, so one bad email
+/// doesn't block the digest. Returns the threads it (re)analyzed.
+#[tauri::command]
+pub async fn analyze_inbox(
+    pool: tauri::State<'_, SqlitePool>,
+    model: Option<String>,
+    base_url: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<AnalysisRow>, String> {
+    let limit = limit.unwrap_or(25);
+
+    let stale_thread_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT t.id
+        FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        WHERE t.folder = 'inbox' AND t.archived = 0 AND t.unread = 1
+          AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+        ORDER BY t.last_message_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    for thread_id in stale_thread_ids {
+        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone()).await {
+            Ok(row) => results.push(row),
+            Err(e) => {
+                // Don't let one unparseable/unreachable email kill the batch.
+                eprintln!("analyze_inbox: skipping thread {}: {}", thread_id, e);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Digest for the panel: analyzed, actionable-first, most important first,
+/// soonest deadline first.
+#[tauri::command]
+pub async fn get_digest(
+    pool: tauri::State<'_, SqlitePool>,
+    limit: Option<i64>,
+) -> Result<Vec<DigestItem>, String> {
+    let limit = limit.unwrap_or(50);
+
+    sqlx::query_as::<_, DigestItem>(
+        r#"
+        SELECT
+            a.thread_id, t.subject,
+            COALESCE(m.from_name, '') AS from_name,
+            COALESCE(m.from_email, '') AS from_email,
+            t.unread,
+            a.is_actionable, a.importance, a.category, a.summary, a.action_items, a.deadline
+        FROM email_analysis a
+        JOIN threads t ON t.id = a.thread_id
+        LEFT JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        WHERE t.folder = 'inbox' AND t.archived = 0
+        ORDER BY
+            a.is_actionable DESC,
+            a.importance DESC,
+            CASE WHEN a.deadline IS NULL THEN 1 ELSE 0 END,
+            a.deadline ASC,
+            t.last_message_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Single-thread analysis lookup, for the per-thread badge in the preview pane.
+#[tauri::command]
+pub async fn get_thread_analysis(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+) -> Result<Option<AnalysisRow>, String> {
+    sqlx::query_as::<_, AnalysisRow>("SELECT * FROM email_analysis WHERE thread_id = ?")
+        .bind(thread_id)
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| e.to_string())
+}

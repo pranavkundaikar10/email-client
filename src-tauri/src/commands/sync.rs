@@ -711,6 +711,29 @@ pub async fn mark_thread_read(
     Ok(())
 }
 
+/// Mark a thread unread in the local app database. This intentionally does
+/// not change the remote IMAP mailbox; it is useful for resurfacing mail for
+/// local workflows such as inbox triage.
+#[tauri::command]
+pub async fn mark_thread_unread(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+) -> Result<(), String> {
+    sqlx::query("UPDATE threads SET unread = 1 WHERE id = ?")
+        .bind(&thread_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE messages SET unread = 1 WHERE thread_id = ?")
+        .bind(&thread_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn star_thread(
     app: tauri::AppHandle,

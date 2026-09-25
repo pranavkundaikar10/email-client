@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical } from "lucide-react";
+import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical, RefreshCw, Sparkles } from "lucide-react";
 import { api, type SplitRule } from "../../lib/api";
 
 const RULE_TYPES: { value: SplitRule["type"]; label: string; hasValue: boolean }[] = [
@@ -26,12 +26,18 @@ function parseSplit(raw: { id: string; name: string; position: number; rules: st
   };
 }
 
+function formatModelSize(bytes: number): string {
+  if (!bytes) return "";
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
 interface Props { onClose: () => void; }
 
 export default function SplitsSettings({ onClose }: Props) {
   const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -45,6 +51,25 @@ export default function SplitsSettings({ onClose }: Props) {
     queryKey: ["splits"],
     queryFn: api.getSplits,
   });
+
+  const { data: configuredModel } = useQuery({
+    queryKey: ["ai_model"],
+    queryFn: api.getAiModel,
+  });
+
+  const {
+    data: ollamaModels = [],
+    error: ollamaError,
+    isFetching: fetchingModels,
+    refetch: refetchModels,
+  } = useQuery({
+    queryKey: ["ollama_models"],
+    queryFn: api.getOllamaModels,
+  });
+
+  useEffect(() => {
+    if (configuredModel && selectedModel === null) setSelectedModel(configuredModel);
+  }, [configuredModel, selectedModel]);
 
   const [splits, setSplits] = useState<LocalSplit[] | null>(null);
   const effective = splits ?? rawSplits.map(parseSplit);
@@ -131,6 +156,9 @@ export default function SplitsSettings({ onClose }: Props) {
     setSaving(true);
     setError(null);
     try {
+      if (selectedModel && selectedModel !== configuredModel) {
+        await api.setAiModel(selectedModel);
+      }
       const existing = new Set(rawSplits.map((s) => s.id));
       const kept = new Set(effective.map((s) => s.id));
 
@@ -157,6 +185,7 @@ export default function SplitsSettings({ onClose }: Props) {
 
       queryClient.invalidateQueries({ queryKey: ["splits"] });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["ai_model"] });
       setSplits(null);
       onClose();
     } catch (e) {
@@ -171,18 +200,61 @@ export default function SplitsSettings({ onClose }: Props) {
       <div className="bg-white rounded-xl shadow-2xl w-[560px] max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-sm font-semibold text-gray-900">Split Inbox</h2>
+          <h2 className="text-sm font-semibold text-gray-900">Settings</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X size={15} />
           </button>
         </div>
 
-        <p className="px-6 pt-3 pb-1 text-xs text-gray-400">
-          Emails are assigned to the first split whose rules match. A split with no rules is a catch-all.
-        </p>
-
-        {/* Splits list */}
+        {/* Settings content */}
         <div className="flex-1 overflow-y-auto px-6 py-3 space-y-3">
+          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5">
+                <Sparkles size={14} className="text-indigo-500" />
+                <h3 className="text-xs font-semibold text-gray-800">Local AI model</h3>
+              </div>
+              <button
+                onClick={() => refetchModels()}
+                disabled={fetchingModels}
+                title="Refresh installed Ollama models"
+                className="text-gray-400 hover:text-gray-700 disabled:opacity-40"
+              >
+                <RefreshCw size={13} className={fetchingModels ? "animate-spin" : ""} />
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Uses models installed in your local Ollama instance. Changing this affects future analyses only.
+            </p>
+            {ollamaError ? (
+              <p className="mt-2 text-xs text-red-600">
+                Could not reach Ollama. Start it, then refresh the list. {String(ollamaError)}
+              </p>
+            ) : (
+              <select
+                value={selectedModel ?? configuredModel ?? ""}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                disabled={ollamaModels.length === 0}
+                className="mt-3 w-full rounded-md border border-indigo-100 bg-white px-2.5 py-2 text-xs text-gray-700 outline-none focus:border-indigo-400 disabled:opacity-50"
+              >
+                {ollamaModels.length === 0 ? (
+                  <option value="">No local models found</option>
+                ) : (
+                  ollamaModels.map((model) => (
+                    <option key={model.name} value={model.name}>
+                      {model.name}{model.size ? ` — ${formatModelSize(model.size)}` : ""}
+                    </option>
+                  ))
+                )}
+              </select>
+            )}
+          </section>
+
+          <p className="pt-1 text-xs text-gray-400">
+            Split inbox rules: emails are assigned to the first matching split. A split with no rules is a catch-all.
+          </p>
+
+          {/* Splits list */}
           {effective.map((split, idx) => (
             <div key={split.id} className="border border-gray-200 rounded-lg overflow-hidden">
               {/* Split header */}

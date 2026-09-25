@@ -86,6 +86,12 @@ export interface AutoAnalysisCandidate {
   message_id: string;
 }
 
+export interface OllamaModel {
+  name: string;
+  size: number;
+  modified_at: string | null;
+}
+
 export interface ReviewItem extends Thread {
   thread_id: string;
   importance: number;
@@ -170,6 +176,15 @@ export const api = {
 
   analyzeInbox: (model?: string, baseUrl?: string, limit?: number) =>
     invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit }),
+
+  getOllamaModels: () =>
+    invoke<OllamaModel[]>("get_ollama_models"),
+
+  getAiModel: () =>
+    invoke<string>("get_ai_model"),
+
+  setAiModel: (model: string) =>
+    invoke<void>("set_ai_model", { model }),
 
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),

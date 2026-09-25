@@ -37,7 +37,7 @@ npm run tauri dev
 
 The last command starts the Vite development server and the Tauri desktop application. Ollama should remain running locally; the app contacts it at `http://localhost:11434`.
 
-`gemma4:e4b` is a comparatively large local download. If it is too slow for your machine, you can change `DEFAULT_MODEL` in `src-tauri/src/commands/agent.rs` to a smaller Ollama model such as `qwen2.5:7b-instruct`, then pull that model with Ollama.
+`gemma4:e4b` is a comparatively large local download. If it is too slow for your machine, pull a smaller model such as `qwen2.5:7b-instruct`, then choose it under **Settings → Local AI model**. The selector lists models installed in Ollama dynamically and affects future analyses.
 
 ## Connect a Gmail account
 

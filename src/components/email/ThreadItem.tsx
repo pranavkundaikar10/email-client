@@ -6,6 +6,7 @@ interface Props {
   thread: Thread;
   selected: boolean;
   checked: boolean;
+  importance?: number;
   onClick: () => void;
   onCheck: () => void;
   onStar: () => void;
@@ -35,12 +36,17 @@ function firstRecipient(toEmailsJson: string): string {
   }
 }
 
-export default function ThreadItem({ thread, selected, checked, onClick, onCheck, onStar }: Props) {
+export default function ThreadItem({ thread, selected, checked, importance, onClick, onCheck, onStar }: Props) {
   const unread = thread.unread && !selected;
   const isSentOrDraft = thread.folder === "sent" || thread.folder === "drafts";
   const senderLabel = isSentOrDraft
     ? `To: ${firstRecipient(thread.to_emails) || thread.to_emails}`
     : thread.from_name || thread.from_email;
+  const severity = importance === undefined ? null
+    : importance >= 5 ? { label: "Critical", style: "bg-red-100 text-red-700" }
+    : importance >= 4 ? { label: "High", style: "bg-amber-100 text-amber-700" }
+    : importance >= 3 ? { label: "Medium", style: "bg-blue-100 text-blue-700" }
+    : { label: "Low", style: "bg-gray-100 text-gray-500" };
 
   return (
     <div
@@ -87,9 +93,14 @@ export default function ThreadItem({ thread, selected, checked, onClick, onCheck
         >
           {senderLabel}
         </span>
-        <span className="text-xs text-gray-400 flex-shrink-0">
-          {formatDate(thread.last_message_at)}
-        </span>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {severity && (
+            <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${severity.style}`}>
+              {severity.label}
+            </span>
+          )}
+          <span className="text-xs text-gray-400">{formatDate(thread.last_message_at)}</span>
+        </div>
       </div>
 
       <div className="flex items-center gap-1.5">

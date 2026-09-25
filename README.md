@@ -27,9 +27,11 @@ Install the Xcode Command Line Tools, then install a current Node.js LTS release
 ```bash
 xcode-select --install
 curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+# Make Cargo available in this terminal immediately after Rustup finishes
+source "$HOME/.cargo/env"
 ```
 
-Install Node.js LTS from [nodejs.org](https://nodejs.org/) and Ollama from [ollama.com](https://ollama.com/), then open a new terminal and verify:
+Install Node.js LTS from [nodejs.org](https://nodejs.org/) and Ollama from [ollama.com](https://ollama.com/), then verify:
 
 ```bash
 node --version
@@ -123,7 +125,8 @@ npm run tauri build
 | --- | --- |
 | A normal browser opens instead of the desktop app | Run `npm run tauri dev`, not `npm run dev`. |
 | `tauri: command not found` | From the repository root, run `npm install`, then use `npm run tauri dev`. Do not run `tauri dev` directly unless you intentionally installed a global CLI. |
-| `cargo` or a native compiler is missing | Install Rust and the Tauri system prerequisites for your operating system, then open a new terminal. |
+| `cargo` is not found after installing Rust | Run `source "$HOME/.cargo/env"` or open a new terminal, then retry. |
+| A native compiler is missing | Install the Tauri system prerequisites for your operating system, then retry. |
 | Ollama model error or no models in Settings | Start Ollama, run `ollama pull gemma4:e4b`, then refresh **Settings → Local AI model**. |
 | Gmail login fails | Use a Google App Password, not the normal Gmail password, and confirm 2-Step Verification is enabled. |
 

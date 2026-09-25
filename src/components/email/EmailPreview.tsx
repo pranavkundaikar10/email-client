@@ -233,7 +233,13 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
   );
 }
 
-export default function EmailPreview({ email }: { email: string }) {
+function reviewRecommendation(category: string, actionable: boolean, importance: number) {
+  if (category === "rejection" || category === "newsletter" || (!actionable && importance <= 2)) return "Archive — low risk";
+  if (["assessment", "interview", "offer", "deadline"].includes(category)) return "Keep in inbox";
+  return "Needs your review";
+}
+
+export default function EmailPreview({ email, reviewMode = false }: { email: string; reviewMode?: boolean }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
@@ -247,6 +253,13 @@ export default function EmailPreview({ email }: { email: string }) {
     queryFn: () => api.getMessages(selectedThreadId!),
     enabled: !!selectedThreadId,
   });
+
+  const { data: reviewQueue = [] } = useQuery({
+    queryKey: ["review_queue"],
+    queryFn: () => api.getReviewQueue(),
+    enabled: reviewMode,
+  });
+  const reviewItem = reviewQueue.find((item) => item.thread_id === selectedThreadId);
 
   const { mutate: archive, isPending: archiving } = useMutation({
     mutationFn: (threadId: string) => api.archiveThread(threadId),
@@ -284,6 +297,20 @@ export default function EmailPreview({ email }: { email: string }) {
       addToast("Email analyzed");
     },
     onError: (err) => addToast(`Analysis failed: ${String(err)}`),
+  });
+
+  const { mutate: recordReview, isPending: savingReview } = useMutation({
+    mutationFn: async ({ threadId, decision }: { threadId: string; decision: "keep" | "follow_up" | "archived" }) => {
+      if (decision === "archived") await api.archiveThread(threadId);
+      await api.recordReviewDecision(threadId, decision);
+    },
+    onSuccess: (_, { decision }) => {
+      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      addToast(decision === "archived" ? "Archived" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
+      selectNextOrPrev();
+    },
+    onError: (err) => addToast(`Could not save review decision: ${String(err)}`),
   });
 
   useEffect(() => {
@@ -408,6 +435,41 @@ export default function EmailPreview({ email }: { email: string }) {
       </div>
 
       {/* AI-extracted action items, if this thread has been analyzed */}
+      {reviewMode && reviewItem && (
+        <div className="mx-6 mt-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Review decision</p>
+              <p className="mt-1 text-xs font-medium text-gray-700">
+                {reviewRecommendation(reviewItem.category, reviewItem.is_actionable, reviewItem.importance)}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={savingReview}
+                onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "follow_up" })}
+                className="rounded-md px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"
+              >
+                Follow up
+              </button>
+              <button
+                disabled={savingReview}
+                onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "keep" })}
+                className="rounded-md px-2.5 py-1.5 text-xs text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"
+              >
+                Keep
+              </button>
+              <button
+                disabled={savingReview}
+                onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "archived" })}
+                className="rounded-md bg-gray-900 px-3 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-40"
+              >
+                Archive
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <AnalysisBanner threadId={selectedThreadId} />
 
       {/* Messages */}

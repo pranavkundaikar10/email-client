@@ -47,9 +47,19 @@ pub struct AutoAnalysisCandidate {
 #[derive(Debug, Serialize, FromRow)]
 pub struct ReviewItem {
     pub thread_id: String,
+    pub id: String,
+    pub account_id: String,
     pub subject: String,
+    pub snippet: String,
+    pub unread: bool,
+    pub starred: bool,
+    pub archived: bool,
+    pub last_message_at: String,
+    pub label_ids: String,
+    pub folder: String,
     pub from_name: String,
     pub from_email: String,
+    pub to_emails: String,
     pub importance: i64,
     pub category: String,
     pub summary: String,
@@ -385,9 +395,11 @@ pub async fn get_review_queue(
 
     sqlx::query_as::<_, ReviewItem>(
         r#"
-        SELECT a.thread_id, t.subject,
+        SELECT a.thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
+               t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
                COALESCE(m.from_name, '') AS from_name,
                COALESCE(m.from_email, '') AS from_email,
+               COALESCE(m.to_emails, '[]') AS to_emails,
                a.importance, a.category, a.summary, a.action_items,
                a.deadline, a.is_actionable
         FROM email_analysis a

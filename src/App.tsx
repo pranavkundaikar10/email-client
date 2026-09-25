@@ -11,13 +11,13 @@ import ComposeModal from "./components/email/ComposeModal";
 import CommandPalette from "./components/ui/CommandPalette";
 import SplitsSettings from "./components/settings/SplitsSettings";
 import DigestPanel from "./components/agent/DigestPanel";
-import ReviewQueue from "./components/agent/ReviewQueue";
+import ReviewList from "./components/agent/ReviewList";
 import { ToastContainer } from "./components/ui/Toast";
 import { useKeyboardNav } from "./hooks/useKeyboardNav";
 import { useAppStore } from "./store";
 import { api } from "./lib/api";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
 
 const ACCOUNT_KEY = "connected_email";
 
@@ -30,7 +30,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [composeOpen, setComposeOpen] = useState(false);
   const [splitsOpen, setSplitsOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -157,7 +156,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         onSplits={() => setSplitsOpen(true)}
         onCompose={() => setComposeOpen(true)}
         onDigest={() => setDigestOpen(true)}
-        onReview={() => setReviewOpen(true)}
         inboxUnread={Object.values(unreadCounts).reduce((a, b) => a + b, 0)}
       />
 
@@ -204,16 +202,16 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
               inputRef={searchInputRef}
             />
 
-            <ThreadList
+            {activeView === "review" ? <ReviewList /> : <ThreadList
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
               isSearching={isSearching}
-            />
+            />}
           </div>
 
           {/* Email preview */}
-          <EmailPreview email={email} />
+          <EmailPreview email={email} reviewMode={activeView === "review"} />
 
         </div>{/* end thread list + email preview row */}
       </div>{/* end right content column */}
@@ -228,9 +226,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
       {/* Digest — AI action items across unread inbox */}
       {digestOpen && <DigestPanel onClose={() => setDigestOpen(false)} />}
-
-      {/* Review queue — user-approved decisions for analyzed inbox mail */}
-      {reviewOpen && <ReviewQueue onClose={() => setReviewOpen(false)} />}
 
       {/* Command palette */}
       {commandPaletteOpen && (

@@ -1,7 +1,7 @@
 import { Inbox, Star, Archive, Search, LogOut, SlidersHorizontal, Send, FileEdit, SquarePen, Sparkles, ListChecks } from "lucide-react";
 import { cn } from "../../lib/utils";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
 
 interface Props {
   activeView: View;
@@ -11,7 +11,6 @@ interface Props {
   onSplits: () => void;
   onCompose: () => void;
   onDigest: () => void;
-  onReview: () => void;
   inboxUnread: number;
 }
 
@@ -21,10 +20,11 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
   { id: "sent",    icon: Send,     label: "Sent",     shortcut: "G N" },
   { id: "drafts",  icon: FileEdit, label: "Drafts",   shortcut: "G D" },
   { id: "archive", icon: Archive,  label: "Archive",  shortcut: "G A" },
+  { id: "review",  icon: ListChecks,label: "Review",   shortcut: ""    },
   { id: "search",  icon: Search,   label: "Search",   shortcut: "/"   },
 ];
 
-export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, onReview, inboxUnread }: Props) {
+export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, inboxUnread }: Props) {
   return (
     <aside className="w-14 flex flex-col items-center py-4 gap-1 bg-gray-950 border-r border-gray-800 flex-shrink-0">
       {/* Avatar */}
@@ -67,13 +67,6 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
       {/* Spacer */}
       <div className="flex-1" />
 
-      <button
-        onClick={onReview}
-        title="Review today’s analyzed emails"
-        className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors"
-      >
-        <ListChecks size={15} />
-      </button>
       <button
         onClick={onDigest}
         title="Digest — action items from unread mail"

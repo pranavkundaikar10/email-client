@@ -86,11 +86,8 @@ export interface AutoAnalysisCandidate {
   message_id: string;
 }
 
-export interface ReviewItem {
+export interface ReviewItem extends Thread {
   thread_id: string;
-  subject: string;
-  from_name: string;
-  from_email: string;
   importance: number;
   category: AnalysisCategory | string;
   summary: string;

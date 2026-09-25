@@ -29,4 +29,5 @@ native-tls = "0.2"
 mailparse = "0.15"
 html2text = "0.12"
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
+reqwest = { version = "0.12", features = ["json"] }
 

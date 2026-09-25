@@ -10,6 +10,7 @@ import EmailPreview from "./components/email/EmailPreview";
 import ComposeModal from "./components/email/ComposeModal";
 import CommandPalette from "./components/ui/CommandPalette";
 import SplitsSettings from "./components/settings/SplitsSettings";
+import DigestPanel from "./components/agent/DigestPanel";
 import { ToastContainer } from "./components/ui/Toast";
 import { useKeyboardNav } from "./hooks/useKeyboardNav";
 import { useAppStore } from "./store";
@@ -26,6 +27,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const addToast = useAppStore((s) => s.addToast);
   const [composeOpen, setComposeOpen] = useState(false);
   const [splitsOpen, setSplitsOpen] = useState(false);
+  const [digestOpen, setDigestOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -127,6 +129,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         onLogout={onLogout}
         onSplits={() => setSplitsOpen(true)}
         onCompose={() => setComposeOpen(true)}
+        onDigest={() => setDigestOpen(true)}
         inboxUnread={Object.values(unreadCounts).reduce((a, b) => a + b, 0)}
       />
 
@@ -194,6 +197,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
       {/* Split inbox settings */}
       {splitsOpen && <SplitsSettings onClose={() => setSplitsOpen(false)} />}
+
+      {/* Digest — AI action items across unread inbox */}
+      {digestOpen && <DigestPanel onClose={() => setDigestOpen(false)} />}
 
       {/* Command palette */}
       {commandPaletteOpen && (

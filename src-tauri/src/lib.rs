@@ -1,6 +1,6 @@
 mod commands;
 
-use commands::{auth, compose, db, splits, sync};
+use commands::{agent, auth, compose, db, splits, sync};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,6 +25,7 @@ pub fn run() {
             db::get_unread_counts,
             db::search_threads,
             sync::mark_thread_read,
+            sync::mark_thread_unread,
             sync::sync_inbox,
             sync::sync_older,
             sync::sync_sent,
@@ -40,6 +41,10 @@ pub fn run() {
             splits::reorder_splits,
             splits::recategorize_threads,
             compose::send_email,
+            agent::analyze_thread,
+            agent::analyze_inbox,
+            agent::get_digest,
+            agent::get_thread_analysis,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

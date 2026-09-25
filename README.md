@@ -16,16 +16,41 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 - Gradually analyzes at most one eligible email per sync cycle (once per minute), limited to unarchived Inbox mail received today.
 - Includes a human-approved review queue: the model suggests context, but you choose whether to keep, follow up on, or archive a message.
 
-## Requirements
+## Install prerequisites
 
-- A current Node.js LTS release and npm.
-- Rust stable and the native build tools required by Tauri for your operating system. Follow the [official Tauri prerequisite guide](https://v2.tauri.app/start/prerequisites/).
-- [Ollama](https://ollama.com/) running locally for AI analysis.
-- A Gmail account with IMAP access and a Gmail App Password.
+The current credential-storage implementation uses Unix file-permission APIs, so macOS and Linux are the supported development platforms. Windows needs credential-storage work before it should be considered supported.
 
-The current credential storage implementation uses Unix file-permission APIs, so macOS and Linux are the supported development platforms. Windows support needs credential-storage work before it should be considered supported.
+### macOS
 
-## Quick start
+Install the Xcode Command Line Tools, then install a current Node.js LTS release, Rust stable, and Ollama:
+
+```bash
+xcode-select --install
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+```
+
+Install Node.js LTS from [nodejs.org](https://nodejs.org/) and Ollama from [ollama.com](https://ollama.com/), then open a new terminal and verify:
+
+```bash
+node --version
+npm --version
+cargo --version
+ollama --version
+```
+
+### Linux
+
+Install Node.js LTS, Rust stable, and Ollama, then install the distribution-specific WebKit, OpenSSL, compiler, and app-indicator packages required by Tauri. The exact package names vary by distribution; follow the [official Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
+
+### No separate Tauri or database install
+
+Do **not** need to install Tauri globally. `npm install` installs the project-pinned Tauri CLI from `package.json`, and `npm run tauri dev` uses that local copy.
+
+SQLite is embedded in the Rust application through `sqlx`; there is no database server to install, configure, or start. The app creates its local database and runs migrations automatically on first launch.
+
+You also need a Gmail account with IMAP access and a Gmail App Password.
+
+## Run from a fresh clone
 
 ```bash
 git clone https://github.com/pranavkundaikar10/email-client.git
@@ -35,7 +60,9 @@ ollama pull gemma4:e4b
 npm run tauri dev
 ```
 
-The last command starts the Vite development server and the Tauri desktop application. Ollama should remain running locally; the app contacts it at `http://localhost:11434`.
+The last command is the required desktop-app command: it starts Vite **and** the Tauri window. Ollama should remain running locally; the app contacts it at `http://localhost:11434`.
+
+Do not use `npm run dev` to launch the desktop app. That command starts only Vite, so opening `http://localhost:1420` in a normal browser is expected and does not launch Tauri.
 
 `gemma4:e4b` is a comparatively large local download. If it is too slow for your machine, pull a smaller model such as `qwen2.5:7b-instruct`, then choose it under **Settings → Local AI model**. The selector lists models installed in Ollama dynamically and affects future analyses.
 
@@ -89,6 +116,16 @@ cd src-tauri && cargo check
 # Create a desktop bundle
 npm run tauri build
 ```
+
+## Troubleshooting setup
+
+| Symptom | Fix |
+| --- | --- |
+| A normal browser opens instead of the desktop app | Run `npm run tauri dev`, not `npm run dev`. |
+| `tauri: command not found` | From the repository root, run `npm install`, then use `npm run tauri dev`. Do not run `tauri dev` directly unless you intentionally installed a global CLI. |
+| `cargo` or a native compiler is missing | Install Rust and the Tauri system prerequisites for your operating system, then open a new terminal. |
+| Ollama model error or no models in Settings | Start Ollama, run `ollama pull gemma4:e4b`, then refresh **Settings → Local AI model**. |
+| Gmail login fails | Use a Google App Password, not the normal Gmail password, and confirm 2-Step Verification is enabled. |
 
 ## Current limitations
 

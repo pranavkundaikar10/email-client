@@ -113,6 +113,26 @@ struct OllamaResponseMessage {
     content: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OllamaModel {
+    pub name: String,
+    pub size: u64,
+    pub modified_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OllamaTagsResponse {
+    models: Vec<OllamaModel>,
+}
+
+async fn configured_model(pool: &SqlitePool) -> Result<String, String> {
+    sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'ai_model'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|model| model.unwrap_or_else(|| DEFAULT_MODEL.to_string()))
+}
+
 fn system_prompt() -> &'static str {
     r#"You are an assistant that triages a job-seeker's email inbox. For the
 single email given, decide whether it needs action and extract concrete next
@@ -242,7 +262,10 @@ pub async fn analyze_thread(
     model: Option<String>,
     base_url: Option<String>,
 ) -> Result<AnalysisRow, String> {
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = match model {
+        Some(model) => model,
+        None => configured_model(pool.inner()).await?,
+    };
     let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
 
     let (from_name, from_email, subject, body) =
@@ -296,6 +319,56 @@ pub async fn analyze_thread(
         model,
         analyzed_at: now,
     })
+}
+
+/// List models installed in the local Ollama instance. This never pulls a
+/// model or sends mailbox content anywhere.
+#[tauri::command]
+pub async fn get_ollama_models() -> Result<Vec<OllamaModel>, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{}/api/tags", DEFAULT_OLLAMA_URL))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach Ollama at {}: {}", DEFAULT_OLLAMA_URL, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Ollama returned {}", response.status()));
+    }
+
+    let mut models = response
+        .json::<OllamaTagsResponse>()
+        .await
+        .map_err(|e| format!("unexpected Ollama model list: {}", e))?
+        .models;
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(models)
+}
+
+#[tauri::command]
+pub async fn get_ai_model(pool: tauri::State<'_, SqlitePool>) -> Result<String, String> {
+    configured_model(pool.inner()).await
+}
+
+#[tauri::command]
+pub async fn set_ai_model(
+    pool: tauri::State<'_, SqlitePool>,
+    model: String,
+) -> Result<(), String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("model name cannot be empty".to_string());
+    }
+
+    sqlx::query(
+        "INSERT INTO app_settings (key, value) VALUES ('ai_model', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(model)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 /// Analyze every unread inbox thread that is new or has changed since it was

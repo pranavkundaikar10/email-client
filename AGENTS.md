@@ -22,6 +22,9 @@ In particular:
   bounded `prefetch_thread_bodies` command. It prefetches the nearest two
   first, then the remaining look-ahead item only when still relevant; it must
   remain read-only and must not trigger AI analysis.
+- Job-search stage badges must use the persisted `is_job_related` and
+  `job_category` analysis fields through `JobCategoryBadge`; do not infer or
+  display a job stage from a general triage category in a view.
 
 ## Before handoff
 

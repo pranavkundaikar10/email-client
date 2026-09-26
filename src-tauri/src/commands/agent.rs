@@ -12,6 +12,8 @@ pub struct AnalysisRow {
     pub is_actionable: bool,
     pub importance: i64,
     pub category: String,
+    pub is_job_related: bool,
+    pub job_category: Option<String>,
     pub summary: String,
     pub action_items: String, // JSON array, kept as string like `rules`/`label_ids` elsewhere in this codebase
     pub deadline: Option<String>,
@@ -79,6 +81,10 @@ struct ModelPayload {
     #[serde(default = "default_category")]
     category: String,
     #[serde(default)]
+    is_job_related: bool,
+    #[serde(default)]
+    job_category: String,
+    #[serde(default)]
     summary: String,
     #[serde(default)]
     action_items: Vec<String>,
@@ -136,20 +142,42 @@ async fn configured_model(pool: &SqlitePool) -> Result<String, String> {
 fn system_prompt() -> &'static str {
     r#"You are an assistant that triages a job-seeker's email inbox. For the
 single email given, decide whether it needs action and extract concrete next
-steps. Categories: interview, assessment, offer, rejection, application_update,
-networking, deadline, newsletter, other.
+steps. General triage categories: interview, assessment, offer, rejection,
+application_update, networking, deadline, newsletter, other.
+
+Also classify whether the email is directly related to the recipient's active
+job search. Job-related means a specific role, application, hiring process, or
+recruiter outreach. For job-related email choose exactly one job_category:
+confirmation (application received/submitted), rejection, assessment,
+screening (recruiter outreach, phone screen, or scheduling), interview, offer,
+or other. Set is_job_related to false and job_category to an empty string for
+all other mail, including receipts, banking, generic marketing, and unrelated
+newsletters. Do not infer job-relatedness merely from the sender's company.
 
 Respond with ONLY a JSON object, no other text, matching exactly:
 {
   "is_actionable": boolean,
   "importance": integer 1-5 (5 = urgent, e.g. interview invite or offer with a deadline; 1 = fluff/newsletter),
   "category": one of the categories above,
+  "is_job_related": boolean,
+  "job_category": "confirmation|rejection|assessment|screening|interview|offer|other" or "",
   "summary": "one sentence, under 25 words",
   "action_items": ["short imperative next step", "..."],
   "deadline": "YYYY-MM-DD" or null if none stated
 }
 If the email is a newsletter, marketing, or has nothing to act on, set
 is_actionable to false, importance to 1 or 2, and action_items to []."#
+}
+
+fn normalized_job_category(is_job_related: bool, category: &str) -> Option<String> {
+    if !is_job_related {
+        return None;
+    }
+    let category = category.trim().to_ascii_lowercase();
+    match category.as_str() {
+        "confirmation" | "rejection" | "assessment" | "screening" | "interview" | "offer" | "other" => Some(category),
+        _ => Some("other".to_string()),
+    }
 }
 
 fn strip_html(html: &str) -> String {
@@ -300,17 +328,20 @@ pub async fn analyze_thread(
     let action_items_json =
         serde_json::to_string(&payload.action_items).unwrap_or_else(|_| "[]".to_string());
     let importance = payload.importance.clamp(1, 5);
+    let job_category = normalized_job_category(payload.is_job_related, &payload.job_category);
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
         r#"
         INSERT INTO email_analysis
-            (thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, is_actionable, importance, category, is_job_related, job_category, summary, action_items, deadline, model, analyzed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             is_actionable = excluded.is_actionable,
             importance    = excluded.importance,
             category      = excluded.category,
+            is_job_related = excluded.is_job_related,
+            job_category  = excluded.job_category,
             summary       = excluded.summary,
             action_items  = excluded.action_items,
             deadline      = excluded.deadline,
@@ -322,6 +353,8 @@ pub async fn analyze_thread(
     .bind(payload.is_actionable)
     .bind(importance)
     .bind(&payload.category)
+    .bind(payload.is_job_related)
+    .bind(&job_category)
     .bind(&payload.summary)
     .bind(&action_items_json)
     .bind(&payload.deadline)
@@ -336,6 +369,8 @@ pub async fn analyze_thread(
         is_actionable: payload.is_actionable,
         importance,
         category: payload.category,
+        is_job_related: payload.is_job_related,
+        job_category,
         summary: payload.summary,
         action_items: action_items_json,
         deadline: payload.deadline,

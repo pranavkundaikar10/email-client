@@ -20,7 +20,6 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
   { id: "sent",    icon: Send,     label: "Sent",     shortcut: "G N" },
   { id: "drafts",  icon: FileEdit, label: "Drafts",   shortcut: "G D" },
   { id: "archive", icon: Archive,  label: "Archive",  shortcut: "G A" },
-  { id: "review",  icon: ListChecks,label: "Review",   shortcut: ""    },
   { id: "search",  icon: Search,   label: "Search",   shortcut: "/"   },
 ];
 
@@ -33,6 +32,20 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
           {email[0]?.toUpperCase() ?? "?"}
         </span>
       </div>
+
+      {/* Review is the primary productivity workflow, ahead of compose. */}
+      <button
+        onClick={() => onViewChange("review")}
+        title="Review queue"
+        className={cn(
+          "w-9 h-9 flex items-center justify-center rounded-lg transition-colors mb-1",
+          activeView === "review"
+            ? "bg-indigo-500 text-white"
+            : "text-indigo-400 hover:text-indigo-200 hover:bg-indigo-500/15"
+        )}
+      >
+        <ListChecks size={17} />
+      </button>
 
       {/* Compose */}
       <button

@@ -1051,51 +1051,104 @@ fn html_visible_content_score(html: &str) -> usize {
     visible.len()
 }
 
+struct HtmlCandidate {
+    body: String,
+    // Standard HTML is safest to render in our sandbox. AMP/XHTML remains a
+    // useful fallback for senders such as LinkedIn that omit text/html.
+    is_standard_html: bool,
+}
+
+fn decoded_body_lossy(mail: &mailparse::ParsedMail) -> String {
+    match mail.get_body() {
+        Ok(body) => body,
+        Err(error) => {
+            // Real marketing and banking mail occasionally declares an invalid
+            // charset or transfer encoding. Gmail renders these tolerantly;
+            // never turn a recoverable decoding error into an empty email.
+            eprintln!(
+                "Falling back to lossy MIME decoding for {}: {}",
+                mail.ctype.mimetype, error
+            );
+            mail.get_body_raw()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|raw_error| {
+                    eprintln!("Unable to recover raw MIME body: {raw_error}");
+                    String::new()
+                })
+        }
+    }
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let prefix = body.get(..2048).unwrap_or(body).to_ascii_lowercase();
+    prefix.contains("<!doctype html")
+        || prefix.contains("<html")
+        || prefix.contains("<body")
+        || (prefix.contains("<table") && prefix.contains("</table>"))
+}
+
+fn collect_body_parts(
+    mail: &mailparse::ParsedMail,
+    html_candidates: &mut Vec<HtmlCandidate>,
+    text_candidates: &mut Vec<String>,
+    has_attachments: &mut bool,
+) {
+    if !mail.subparts.is_empty() {
+        for part in &mail.subparts {
+            collect_body_parts(part, html_candidates, text_candidates, has_attachments);
+        }
+        return;
+    }
+
+    let ct = mail.ctype.mimetype.to_lowercase();
+    let disposition = mail
+        .headers
+        .get_first_value("Content-Disposition")
+        .unwrap_or_default()
+        .to_lowercase();
+    // Inline images (for example, a company logo) are intentionally not
+    // treated as attachments. Only explicit MIME attachments trigger the
+    // conservative review signal.
+    if disposition.contains("attachment") {
+        *has_attachments = true;
+        return;
+    }
+
+    let body = decoded_body_lossy(mail);
+    let is_standard_html = ct == "text/html";
+    let is_supported_rich_html = (ct.starts_with("text/") && ct.ends_with("html"))
+        || ct == "application/xhtml+xml"
+        // Some bulk senders incorrectly declare HTML as a generic or custom
+        // content type. Trust the body shape only after MIME decoding.
+        || looks_like_html(&body);
+    if is_standard_html || is_supported_rich_html {
+        if html_visible_content_score(&body) > 0 {
+            html_candidates.push(HtmlCandidate { body, is_standard_html });
+        }
+    } else if ct == "text/plain" && !body.trim().is_empty() {
+        text_candidates.push(body);
+    }
+}
+
 fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>, bool) {
-    let mut html_candidates: Vec<String> = Vec::new();
-    let mut text_candidates: Vec<String> = Vec::new();
-
-    if mail.subparts.is_empty() {
-        let ct = mail.ctype.mimetype.to_lowercase();
-        let disposition = mail
-            .headers
-            .get_first_value("Content-Disposition")
-            .unwrap_or_default()
-            .to_lowercase();
-        // Inline images (for example, a company logo) are intentionally not
-        // treated as attachments. Only explicit MIME attachments trigger the
-        // conservative review signal.
-        if disposition.contains("attachment") {
-            return (None, None, true);
-        }
-        let body = mail.get_body().unwrap_or_default();
-        if ct == "text/html" {
-            if html_visible_content_score(&body) > 0 {
-                html_candidates.push(body);
-            }
-        } else if ct == "text/plain" {
-            if !body.trim().is_empty() {
-                text_candidates.push(body);
-            }
-        }
-        return (
-            html_candidates.into_iter().max_by_key(|body| html_visible_content_score(body)),
-            text_candidates.into_iter().max_by_key(|body| body.trim().len()),
-            false,
-        );
-    }
-
+    let mut html_candidates = Vec::new();
+    let mut text_candidates = Vec::new();
     let mut has_attachments = false;
-    for part in &mail.subparts {
-        let (h, t, attached) = extract_body_parts(part);
-        if let Some(html) = h { html_candidates.push(html); }
-        if let Some(text) = t { text_candidates.push(text); }
-        has_attachments |= attached;
-    }
+    collect_body_parts(mail, &mut html_candidates, &mut text_candidates, &mut has_attachments);
 
-    (
-        html_candidates.into_iter().max_by_key(|body| html_visible_content_score(body)),
-        text_candidates.into_iter().max_by_key(|body| body.trim().len()),
-        has_attachments,
-    )
+    // Prefer a meaningful standard text/html representation whenever present.
+    // If a sender only supplies AMP HTML or XHTML, retain the best meaningful
+    // alternative instead of degrading immediately to raw plain text.
+    let html = html_candidates
+        .iter()
+        .filter(|candidate| candidate.is_standard_html)
+        .max_by_key(|candidate| html_visible_content_score(&candidate.body))
+        .or_else(|| html_candidates.iter().max_by_key(|candidate| html_visible_content_score(&candidate.body)))
+        .map(|candidate| candidate.body.clone());
+
+    let text = text_candidates
+        .into_iter()
+        .max_by_key(|body| body.trim().len());
+
+    (html, text, has_attachments)
 }

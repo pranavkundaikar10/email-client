@@ -102,6 +102,11 @@ pub async fn get_threads(
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE {}
+          AND NOT EXISTS (
+              SELECT 1 FROM mail_operations o
+              WHERE o.thread_id = t.id
+                AND o.status IN ('pending', 'in_progress')
+          )
         ORDER BY t.last_message_at DESC
         LIMIT ? OFFSET ?
         "#,
@@ -145,6 +150,11 @@ pub async fn get_unread_counts(
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT category, COUNT(*) FROM threads
          WHERE unread = 1 AND archived = 0 AND folder = 'inbox'
+           AND NOT EXISTS (
+               SELECT 1 FROM mail_operations o
+               WHERE o.thread_id = threads.id
+                 AND o.status IN ('pending', 'in_progress')
+           )
          GROUP BY category",
     )
     .fetch_all(pool.inner())
@@ -175,6 +185,11 @@ pub async fn search_threads(
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE threads_fts MATCH ?
+          AND NOT EXISTS (
+              SELECT 1 FROM mail_operations o
+              WHERE o.thread_id = t.id
+                AND o.status IN ('pending', 'in_progress')
+          )
         ORDER BY rank
         LIMIT 50
         "#,

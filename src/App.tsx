@@ -16,6 +16,7 @@ import { ToastContainer } from "./components/ui/Toast";
 import { useKeyboardNav } from "./hooks/useKeyboardNav";
 import { useAppStore } from "./store";
 import { api } from "./lib/api";
+import { listen } from "@tauri-apps/api/event";
 
 type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
 
@@ -38,6 +39,17 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const setActiveSplitId = useAppStore((s) => s.setActiveSplitId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    const unlisten = listen<{ operation: string; error: string }>("mail-operation-failed", ({ payload }) => {
+      const action = payload.operation === "trash" ? "move the email to Gmail Trash" : "archive the email";
+      addToast(`Could not ${action}. It has been returned to your inbox.`);
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      console.warn("Queued Gmail operation failed:", payload.error);
+    });
+    return () => { void unlisten.then((fn) => fn()); };
+  }, [addToast, queryClient]);
 
   const { data: rawSplits = [] } = useQuery({
     queryKey: ["splits"],
@@ -118,6 +130,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     async function sync() {
       setSyncing(true);
       try {
+        // Drains one durable Gmail archive/delete operation. This is tiny
+        // when the queue is empty and provides retry after app restarts.
+        await api.processPendingMailOperations();
         await api.syncInbox(email);
         queryClient.invalidateQueries({ queryKey: ["threads"] });
         queryClient.invalidateQueries({ queryKey: ["unread_counts"] });

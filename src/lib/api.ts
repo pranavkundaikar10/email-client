@@ -127,6 +127,9 @@ export const api = {
   deleteThread: (threadId: string) =>
     invoke<void>("delete_thread", { threadId: threadId }),
 
+  processPendingMailOperations: () =>
+    invoke<void>("process_pending_mail_operations"),
+
   starThread: (threadId: string, starred: boolean) =>
     invoke<void>("star_thread", { threadId, starred }),
 

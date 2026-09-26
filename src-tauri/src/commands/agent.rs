@@ -163,12 +163,19 @@ fn truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect::<String>() + "…"
 }
 
-fn build_user_prompt(from_name: &str, from_email: &str, subject: &str, body: &str) -> String {
+fn build_user_prompt(
+    from_name: &str,
+    from_email: &str,
+    subject: &str,
+    body: &str,
+    has_attachments: bool,
+) -> String {
     format!(
-        "From: {} <{}>\nSubject: {}\n\nBody:\n{}",
+        "From: {} <{}>\nSubject: {}\nAttachments: {}\n\nBody:\n{}",
         from_name,
         from_email,
         subject,
+        if has_attachments { "yes — content has not been read" } else { "none" },
         truncate(body.trim(), MAX_BODY_CHARS)
     )
 }
@@ -217,11 +224,11 @@ async fn call_model(
 async fn latest_message_text(
     pool: &SqlitePool,
     thread_id: &str,
-) -> Result<(String, String, String, String), String> {
-    // (from_name, from_email, subject, body)
-    let row: Option<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+) -> Result<(String, String, String, String, bool), String> {
+    // (from_name, from_email, subject, body, has_attachments)
+    let row: Option<(String, String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
         r#"
-        SELECT from_name, from_email, subject, body_text, body_html
+        SELECT from_name, from_email, subject, body_text, body_html, has_attachments
         FROM messages
         WHERE thread_id = ?
         ORDER BY sent_at DESC
@@ -233,7 +240,7 @@ async fn latest_message_text(
     .await
     .map_err(|e| e.to_string())?;
 
-    let Some((from_name, from_email, subject, body_text, body_html)) = row else {
+    let Some((from_name, from_email, subject, body_text, body_html, has_attachments_int)) = row else {
         return Err(format!("no messages found for thread {}", thread_id));
     };
 
@@ -251,7 +258,7 @@ async fn latest_message_text(
         }
     };
 
-    Ok((from_name, from_email, subject, body))
+    Ok((from_name, from_email, subject, body, has_attachments_int != 0))
 }
 
 /// Analyze a single thread and upsert the result into `email_analysis`.
@@ -268,11 +275,27 @@ pub async fn analyze_thread(
     };
     let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
 
-    let (from_name, from_email, subject, body) =
+    let (from_name, from_email, subject, body, has_attachments) =
         latest_message_text(pool.inner(), &thread_id).await?;
 
-    let prompt = build_user_prompt(&from_name, &from_email, &subject, &body);
-    let payload = call_model(&base_url, &model, prompt).await?;
+    let prompt = build_user_prompt(&from_name, &from_email, &subject, &body, has_attachments);
+    let mut payload = call_model(&base_url, &model, prompt).await?;
+
+    // An attached document may contain the actual assessment, contract, or
+    // request. Until attachment extraction exists, never let the model label
+    // such a message low-risk or safe to archive without a human review.
+    if has_attachments {
+        payload.is_actionable = true;
+        payload.importance = payload.importance.max(3);
+        if !payload.action_items.iter().any(|item| item.contains("attachment")) {
+            payload.action_items.insert(0, "Review the attachment before archiving.".to_string());
+        }
+        payload.summary = if payload.summary.trim().is_empty() {
+            "Attachment present — review before archiving.".to_string()
+        } else {
+            format!("Attachment present — {}", payload.summary)
+        };
+    }
 
     let action_items_json =
         serde_json::to_string(&payload.action_items).unwrap_or_else(|_| "[]".to_string());
@@ -390,6 +413,7 @@ pub async fn analyze_inbox(
         FROM threads t
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0 AND t.unread = 1
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
         ORDER BY t.last_message_at DESC
         LIMIT ?
@@ -438,6 +462,7 @@ pub async fn get_auto_analysis_candidates(
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ?
           AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
         ORDER BY t.last_message_at DESC
@@ -486,6 +511,7 @@ pub async fn get_review_queue(
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_reviews r ON r.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ? AND r.thread_id IS NULL
         ORDER BY {order_by}
         LIMIT ?
@@ -551,6 +577,7 @@ pub async fn get_digest(
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
         ORDER BY
             a.is_actionable DESC,
             a.importance DESC,

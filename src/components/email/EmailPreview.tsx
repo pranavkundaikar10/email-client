@@ -197,11 +197,11 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
     }`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-500">
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-500">
             <Sparkles size={12} />
             AI analysis
           </div>
-          <p className={`mt-1 text-xs font-medium leading-relaxed ${
+          <p className={`mt-1.5 text-sm font-medium leading-relaxed ${
             analysis.is_actionable ? "text-indigo-800" : "text-gray-700"
           }`}>
             {analysis.summary || (analysis.is_actionable ? "Action needed" : "No action needed")}
@@ -209,7 +209,7 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
         </div>
         <div
           title={`Importance ${analysis.importance} out of 5 — ${severity}`}
-          className={`flex flex-shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-semibold ring-1 ${severityStyle}`}
+          className={`flex flex-shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ${severityStyle}`}
         >
           <span>{severity}</span>
           <span className="h-3 w-px bg-current opacity-20" />
@@ -217,12 +217,12 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
         </div>
       </div>
       {analysis.deadline && (
-        <p className="mt-1.5 text-[11px] font-medium text-red-600">Due {analysis.deadline}</p>
+        <p className="mt-2 text-xs font-medium text-red-600">Due {analysis.deadline}</p>
       )}
       {items.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {items.map((it, i) => (
-            <li key={i} className="text-xs text-gray-700 flex gap-1.5">
+            <li key={i} className="text-sm text-gray-700 flex gap-1.5">
               <span className="text-indigo-300">•</span>
               {it}
             </li>
@@ -234,8 +234,9 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
 }
 
 function reviewRecommendation(category: string, actionable: boolean, importance: number) {
-  if (category === "rejection" || category === "newsletter" || (!actionable && importance <= 2)) return "Archive — low risk";
   if (["assessment", "interview", "offer", "deadline"].includes(category)) return "Keep in inbox";
+  if (actionable || importance >= 3) return "Needs your review";
+  if (category === "rejection" || category === "newsletter" || importance <= 2) return "Archive — low risk";
   return "Needs your review";
 }
 
@@ -307,7 +308,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     onSuccess: (_, { decision }) => {
       queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
-      addToast(decision === "archived" ? "Archived" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
+      addToast(decision === "archived" ? "Archive queued" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
       selectNextOrPrev();
     },
     onError: (err) => addToast(`Could not save review decision: ${String(err)}`),
@@ -318,7 +319,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
-      addToast("Moved to Gmail Trash");
+      addToast("Move to Gmail Trash queued");
       selectNextOrPrev();
     },
     onError: (err) => addToast(`Could not delete email: ${String(err)}`),
@@ -450,8 +451,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
         <div className="mx-6 mt-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Review decision</p>
-              <p className="mt-1 text-xs font-medium text-gray-700">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Review decision</p>
+              <p className="mt-1.5 text-sm font-medium text-gray-700">
                 {reviewRecommendation(reviewItem.category, reviewItem.is_actionable, reviewItem.importance)}
               </p>
             </div>
@@ -459,21 +460,21 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
               <button
                 disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "follow_up" })}
-                className="rounded-md px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"
+                className="rounded-md px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-40"
               >
                 Follow up
               </button>
               <button
                 disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "keep" })}
-                className="rounded-md px-2.5 py-1.5 text-xs text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"
+                className="rounded-md px-3 py-2 text-sm text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"
               >
                 Keep
               </button>
               <button
                 disabled={savingReview || deletingFromReview}
                 onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "archived" })}
-                className="rounded-md bg-gray-900 px-3 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-40"
+                className="rounded-md bg-gray-900 px-3 py-2 text-sm text-white hover:bg-gray-700 disabled:opacity-40"
               >
                 Archive
               </button>
@@ -481,7 +482,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
                 disabled={savingReview || deletingFromReview}
                 onClick={() => deleteFromReview(reviewItem.thread_id)}
                 title="Move email to Gmail Trash"
-                className="rounded-md px-2 py-1.5 text-xs text-red-500 hover:bg-red-50 disabled:opacity-40"
+                className="rounded-md px-2.5 py-2 text-sm text-red-500 hover:bg-red-50 disabled:opacity-40"
               >
                 <Trash2 size={14} />
               </button>

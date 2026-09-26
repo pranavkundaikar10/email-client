@@ -21,9 +21,9 @@ function severity(importance: number): string {
 }
 
 function recommendation(item: ReviewItem): "archive" | "keep" | "review" {
-  if (item.category === "rejection" || item.category === "newsletter") return "archive";
   if (item.category === "assessment" || item.category === "interview" || item.category === "offer" || item.category === "deadline") return "keep";
-  if (!item.is_actionable && item.importance <= 2) return "archive";
+  if (item.is_actionable || item.importance >= 3) return "review";
+  if (item.category === "rejection" || item.category === "newsletter" || item.importance <= 2) return "archive";
   return "review";
 }
 
@@ -47,7 +47,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
       await api.recordReviewDecision(item.thread_id, decision);
       await queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       await queryClient.invalidateQueries({ queryKey: ["threads"] });
-      addToast(decision === "archived" ? "Archived" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
+      addToast(decision === "archived" ? "Archive queued" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
       setOffset(0);
     } catch (error) {
       addToast(`Could not save decision: ${String(error)}`);

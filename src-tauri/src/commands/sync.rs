@@ -3,8 +3,13 @@ use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
 use sqlx::SqlitePool;
 use std::net::TcpStream;
+use std::sync::Arc;
 use chrono::Utc;
 use chrono::NaiveDateTime;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+use serde::Serialize;
+use tauri::Emitter;
 
 type ImapSession = Session<native_tls::TlsStream<TcpStream>>;
 
@@ -12,6 +17,14 @@ const GMAIL_IMAP_HOST: &str = "imap.gmail.com";
 const GMAIL_IMAP_PORT: u16 = 993;
 const SYNC_DAYS: i64 = 365;
 const SYNC_LIMIT: usize = 2000;
+const MAX_OPERATION_ATTEMPTS: i64 = 3;
+
+/// Ensures Gmail-changing operations run one at a time, even when several
+/// buttons or keyboard shortcuts are pressed in quick succession.
+#[derive(Clone, Default)]
+pub struct MailOperationWorker {
+    lock: Arc<Mutex<()>>,
+}
 
 struct MessageMeta {
     imap_uid: String,
@@ -455,7 +468,7 @@ pub async fn fetch_message_body(
     let password = crate::commands::auth::load_password(&app, &email)?;
     let message_id_clone = message_id.clone();
 
-    let (body_html, body_text) = tokio::task::spawn_blocking(move || {
+    let (body_html, body_text, has_attachments) = tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &password)?;
 
         let mailbox = match folder.as_str() {
@@ -500,10 +513,11 @@ pub async fn fetch_message_body(
     .map_err(|e| e.to_string())??;
 
     sqlx::query(
-        "UPDATE messages SET body_html = ?, body_text = ?, body_fetched = 1 WHERE id = ?",
+        "UPDATE messages SET body_html = ?, body_text = ?, has_attachments = ?, body_fetched = 1 WHERE id = ?",
     )
     .bind(&body_html)
     .bind(&body_text)
+    .bind(has_attachments as i64)
     .bind(&message_id_clone)
     .execute(pool.inner())
     .await
@@ -805,20 +819,175 @@ pub async fn star_thread(
     Ok(())
 }
 
+#[derive(sqlx::FromRow)]
+struct MailOperation {
+    id: String,
+    thread_id: String,
+    operation: String,
+    attempt_count: i64,
+}
+
+#[derive(Clone, Serialize)]
+struct MailOperationFailure {
+    thread_id: String,
+    operation: String,
+    error: String,
+}
+
+async fn enqueue_mail_operation(
+    pool: &SqlitePool,
+    thread_id: &str,
+    operation: &str,
+) -> Result<(), String> {
+    let account_id: String = sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Email thread no longer exists locally".to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    // One current intent per thread. Repeating an action is safe and puts a
+    // previously failed attempt back into the queue.
+    sqlx::query(
+        r#"INSERT INTO mail_operations
+           (id, account_id, thread_id, operation, status, attempt_count, next_retry_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+           ON CONFLICT(thread_id) DO UPDATE SET
+             operation = excluded.operation,
+             status = 'pending',
+             attempt_count = 0,
+             next_retry_at = excluded.next_retry_at,
+             last_error = NULL,
+             updated_at = excluded.updated_at"#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(account_id)
+    .bind(thread_id)
+    .bind(operation)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Attempts one queued Gmail operation. Keeping the worker deliberately
+/// single-item and serialized avoids competing IMAP connections and lets the
+/// normal 60-second sync cycle handle retries without consuming resources.
+pub async fn process_mail_operations(
+    app: &tauri::AppHandle,
+    pool: &SqlitePool,
+    worker: &MailOperationWorker,
+) -> Result<(), String> {
+    let _guard = worker.lock.lock().await;
+    let now = Utc::now().to_rfc3339();
+
+    // A process may have stopped while IMAP was in flight. It is safe to retry
+    // that operation, and avoids a permanently hidden thread after restart.
+    sqlx::query("UPDATE mail_operations SET status = 'pending', updated_at = ? WHERE status = 'in_progress'")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let item: Option<MailOperation> = sqlx::query_as(
+        "SELECT id, thread_id, operation, attempt_count FROM mail_operations \
+         WHERE status = 'pending' AND next_retry_at <= ? ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(&now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(item) = item else { return Ok(()); };
+
+    sqlx::query("UPDATE mail_operations SET status = 'in_progress', updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(&item.id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let result = match item.operation.as_str() {
+        "archive" => imap_move_thread(app, pool, &item.thread_id, "\\All", "[Gmail]/All Mail").await,
+        "trash" => imap_move_thread(app, pool, &item.thread_id, "\\Trash", "[Gmail]/Trash").await,
+        _ => Err("Unknown queued mail operation".to_string()),
+    };
+
+    match result {
+        Ok(()) => {
+            sqlx::query("UPDATE threads SET archived = 1 WHERE id = ?")
+                .bind(&item.thread_id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            sqlx::query("DELETE FROM mail_operations WHERE id = ?")
+                .bind(&item.id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Err(error) => {
+            let attempts = item.attempt_count + 1;
+            let status = if attempts >= MAX_OPERATION_ATTEMPTS { "failed" } else { "pending" };
+            // 10s, 30s, then surface the thread again with a clear error.
+            let delay_secs = match attempts { 1 => 10, 2 => 30, _ => 0 };
+            let retry_at = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
+            sqlx::query(
+                "UPDATE mail_operations SET status = ?, attempt_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(status)
+            .bind(attempts)
+            .bind(retry_at)
+            .bind(&error)
+            .bind(Utc::now().to_rfc3339())
+            .bind(&item.id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if status == "failed" {
+                let _ = app.emit(
+                    "mail-operation-failed",
+                    MailOperationFailure {
+                        thread_id: item.thread_id,
+                        operation: item.operation,
+                        error,
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn start_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailOperationWorker) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = process_mail_operations(&app, &pool, &worker).await {
+            eprintln!("Unable to process queued Gmail operation: {error}");
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn process_pending_mail_operations(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, MailOperationWorker>,
+) -> Result<(), String> {
+    process_mail_operations(&app, pool.inner(), worker.inner()).await
+}
+
 #[tauri::command]
 pub async fn archive_thread(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, MailOperationWorker>,
     thread_id: String,
 ) -> Result<(), String> {
-    imap_move_thread(&app, pool.inner(), &thread_id, "\\All", "[Gmail]/All Mail").await?;
-
-    sqlx::query("UPDATE threads SET archived = 1 WHERE id = ?")
-        .bind(&thread_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| e.to_string())?;
-
+    enqueue_mail_operation(pool.inner(), &thread_id, "archive").await?;
+    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
     Ok(())
 }
 
@@ -826,18 +995,12 @@ pub async fn archive_thread(
 pub async fn delete_thread(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, MailOperationWorker>,
     thread_id: String,
 ) -> Result<(), String> {
-    // UID MOVE to [Gmail]/Trash explicitly puts the message in Trash.
-    // uid_store+expunge was stripping the INBOX label only (archiving), not trashing.
-    imap_move_thread(&app, pool.inner(), &thread_id, "\\Trash", "[Gmail]/Trash").await?;
-
-    sqlx::query("UPDATE threads SET archived = 1 WHERE id = ?")
-        .bind(&thread_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| e.to_string())?;
-
+    // UID MOVE to [Gmail]/Trash explicitly puts the message in Gmail Trash.
+    enqueue_mail_operation(pool.inner(), &thread_id, "trash").await?;
+    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
     Ok(())
 }
 
@@ -861,26 +1024,39 @@ fn parse_date(raw: &str) -> String {
         .unwrap_or_else(|_| Utc::now().to_rfc3339())
 }
 
-fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>) {
+fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>, bool) {
     let mut html: Option<String> = None;
     let mut text: Option<String> = None;
 
     if mail.subparts.is_empty() {
         let ct = mail.ctype.mimetype.to_lowercase();
+        let disposition = mail
+            .headers
+            .get_first_value("Content-Disposition")
+            .unwrap_or_default()
+            .to_lowercase();
+        // Inline images (for example, a company logo) are intentionally not
+        // treated as attachments. Only explicit MIME attachments trigger the
+        // conservative review signal.
+        if disposition.contains("attachment") {
+            return (None, None, true);
+        }
         let body = mail.get_body().unwrap_or_default();
         if ct.contains("html") {
             html = Some(body);
-        } else {
+        } else if ct == "text/plain" {
             text = Some(body);
         }
-        return (html, text);
+        return (html, text, false);
     }
 
+    let mut has_attachments = false;
     for part in &mail.subparts {
-        let (h, t) = extract_body_parts(part);
+        let (h, t, attached) = extract_body_parts(part);
         if html.is_none() { html = h; }
         if text.is_none() { text = t; }
+        has_attachments |= attached;
     }
 
-    (html, text)
+    (html, text, has_attachments)
 }

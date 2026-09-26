@@ -12,6 +12,8 @@ In particular:
 - Gmail-changing actions must go through `src/hooks/useMailActions.ts`; do not
   call archive/delete API methods directly from a view. That shared path owns
   optimistic updates, durable delivery, and the standard 8-second Undo window.
+- Gmail read/star changes must use the durable, coalescing flag-operation
+  queue; never start an unmanaged IMAP request directly from their command.
 - When a behavior is shared by more than one view, extract it into a focused
   reusable component or hook before adding another view-specific version.
 - Keep cache updates, optimistic UI behavior, failure recovery, and keyboard

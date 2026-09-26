@@ -735,6 +735,7 @@ async fn imap_move_thread(
 pub async fn mark_thread_read(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, MailOperationWorker>,
     thread_id: String,
 ) -> Result<(), String> {
     // Update local DB immediately so the UI responds without waiting for IMAP
@@ -750,70 +751,8 @@ pub async fn mark_thread_read(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Sync \Seen flag to Gmail in the background — don't block the response
-    let account_id: Option<String> =
-        sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
-            .bind(&thread_id)
-            .fetch_optional(pool.inner())
-            .await
-            .unwrap_or(None);
-
-    if let Some(account_id) = account_id {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
-        )
-        .bind(&thread_id)
-        .fetch_all(pool.inner())
-        .await
-        .unwrap_or_default();
-
-        let folder: String = sqlx::query_scalar("SELECT folder FROM threads WHERE id = ?")
-            .bind(&thread_id)
-            .fetch_optional(pool.inner())
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "inbox".to_string());
-
-        if let Ok(password) = crate::commands::auth::load_password(&app, &account_id) {
-            let email = account_id.clone();
-            tokio::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || {
-                    let mut session = connect(&email, &password)?;
-                    let mailbox = match folder.as_str() {
-                        "sent"   => find_special_mailbox(&mut session, "\\Sent")
-                                        .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
-                        "drafts" => find_special_mailbox(&mut session, "\\Drafts")
-                                        .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
-                        _        => "INBOX".to_string(),
-                    };
-                    session.select(&mailbox).map_err(|e| e.to_string())?;
-
-                    let mut uids: Vec<String> = rows.iter()
-                        .filter(|(_, u)| !u.is_empty())
-                        .map(|(_, u)| u.clone())
-                        .collect();
-
-                    for (msg_id, uid) in &rows {
-                        if uid.is_empty() {
-                            if let Ok(found) = session.uid_search(
-                                format!("HEADER MESSAGE-ID \"{}\"", msg_id)
-                            ) {
-                                uids.extend(found.into_iter().map(|u| u.to_string()));
-                            }
-                        }
-                    }
-
-                    if !uids.is_empty() {
-                        let _ = session.uid_store(&uids.join(","), "+FLAGS.SILENT (\\Seen)");
-                    }
-                    session.logout().ok();
-                    Ok::<_, String>(())
-                })
-                .await;
-            });
-        }
-    }
+    enqueue_mail_flag_operation(pool.inner(), &thread_id, Some(true), None).await?;
+    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
 
     Ok(())
 }
@@ -845,6 +784,7 @@ pub async fn mark_thread_unread(
 pub async fn star_thread(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, MailOperationWorker>,
     thread_id: String,
     starred: bool,
 ) -> Result<(), String> {
@@ -855,59 +795,8 @@ pub async fn star_thread(
         .await
         .map_err(|e| e.to_string())?;
 
-    let account_id: Option<String> =
-        sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
-            .bind(&thread_id)
-            .fetch_optional(pool.inner())
-            .await
-            .unwrap_or(None);
-
-    if let Some(account_id) = account_id {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
-        )
-        .bind(&thread_id)
-        .fetch_all(pool.inner())
-        .await
-        .unwrap_or_default();
-
-        let folder: String = sqlx::query_scalar("SELECT folder FROM threads WHERE id = ?")
-            .bind(&thread_id)
-            .fetch_optional(pool.inner())
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "inbox".to_string());
-
-        if let Ok(password) = crate::commands::auth::load_password(&app, &account_id) {
-            let email = account_id.clone();
-            tokio::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || {
-                    let mut session = connect(&email, &password)?;
-                    let mailbox = match folder.as_str() {
-                        "sent"   => find_special_mailbox(&mut session, "\\Sent")
-                                        .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
-                        "drafts" => find_special_mailbox(&mut session, "\\Drafts")
-                                        .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
-                        _        => "INBOX".to_string(),
-                    };
-                    session.select(&mailbox).map_err(|e| e.to_string())?;
-                    let uids = resolve_uids(&mut session, &rows)?;
-                    if !uids.is_empty() {
-                        let flag_op = if starred {
-                            "+FLAGS.SILENT (\\Flagged)"
-                        } else {
-                            "-FLAGS.SILENT (\\Flagged)"
-                        };
-                        let _ = session.uid_store(&uids.join(","), flag_op);
-                    }
-                    session.logout().ok();
-                    Ok::<_, String>(())
-                })
-                .await;
-            });
-        }
-    }
+    enqueue_mail_flag_operation(pool.inner(), &thread_id, None, Some(starred)).await?;
+    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
 
     Ok(())
 }
@@ -918,6 +807,16 @@ struct MailOperation {
     thread_id: String,
     operation: String,
     attempt_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct MailFlagOperation {
+    id: String,
+    thread_id: String,
+    seen: Option<bool>,
+    starred: Option<bool>,
+    attempt_count: i64,
+    revision: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -966,10 +865,116 @@ async fn enqueue_mail_operation(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    // Moving a thread out of Inbox supersedes any not-yet-applied flag change.
+    sqlx::query("DELETE FROM mail_flag_operations WHERE thread_id = ?")
+        .bind(thread_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Attempts one queued Gmail operation. Keeping the worker deliberately
+/// Coalesce rapid local read/star changes into one durable desired state.
+async fn enqueue_mail_flag_operation(
+    pool: &SqlitePool,
+    thread_id: &str,
+    seen: Option<bool>,
+    starred: Option<bool>,
+) -> Result<(), String> {
+    let account_id: String = sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Email thread no longer exists locally".to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    sqlx::query(
+        r#"INSERT INTO mail_flag_operations
+           (id, account_id, thread_id, seen, starred, status, attempt_count, next_retry_at, revision, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, 1, ?, ?)
+           ON CONFLICT(thread_id) DO UPDATE SET
+             seen = COALESCE(excluded.seen, mail_flag_operations.seen),
+             starred = COALESCE(excluded.starred, mail_flag_operations.starred),
+             status = 'pending',
+             attempt_count = 0,
+             next_retry_at = excluded.next_retry_at,
+             last_error = NULL,
+             revision = mail_flag_operations.revision + 1,
+             updated_at = excluded.updated_at"#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(account_id)
+    .bind(thread_id)
+    .bind(seen)
+    .bind(starred)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn imap_sync_thread_flags(
+    app: &tauri::AppHandle,
+    pool: &SqlitePool,
+    thread_id: &str,
+    seen: Option<bool>,
+    starred: Option<bool>,
+) -> Result<(), String> {
+    let account_id: String = sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Email thread no longer exists locally".to_string())?;
+    let folder: String = sqlx::query_scalar("SELECT folder FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "inbox".to_string());
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
+    )
+    .bind(thread_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let password = crate::commands::auth::load_password(app, &account_id)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut session = connect(&account_id, &password)?;
+        let mailbox = match folder.as_str() {
+            "sent" => find_special_mailbox(&mut session, "\\Sent")
+                .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "drafts" => find_special_mailbox(&mut session, "\\Drafts")
+                .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            _ => "INBOX".to_string(),
+        };
+        session.select(&mailbox).map_err(|e| e.to_string())?;
+        let uids = resolve_uids(&mut session, &rows)?;
+        if !uids.is_empty() {
+            let uid_set = uids.join(",");
+            if let Some(read) = seen {
+                let operation = if read { "+FLAGS.SILENT (\\Seen)" } else { "-FLAGS.SILENT (\\Seen)" };
+                session.uid_store(&uid_set, operation).map_err(|e| e.to_string())?;
+            }
+            if let Some(is_starred) = starred {
+                let operation = if is_starred { "+FLAGS.SILENT (\\Flagged)" } else { "-FLAGS.SILENT (\\Flagged)" };
+                session.uid_store(&uid_set, operation).map_err(|e| e.to_string())?;
+            }
+        }
+        session.logout().ok();
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Attempts one queued Gmail change. Keeping the worker deliberately
 /// single-item and serialized avoids competing IMAP connections and lets the
 /// normal 60-second sync cycle handle retries without consuming resources.
 pub async fn process_mail_operations(
@@ -987,6 +992,11 @@ pub async fn process_mail_operations(
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE mail_flag_operations SET status = 'pending', updated_at = ? WHERE status = 'in_progress'")
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let item: Option<MailOperation> = sqlx::query_as(
         "SELECT id, thread_id, operation, attempt_count FROM mail_operations \
@@ -996,7 +1006,9 @@ pub async fn process_mail_operations(
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
-    let Some(item) = item else { return Ok(()); };
+    let Some(item) = item else {
+        return process_mail_flag_operation(app, pool, &now).await;
+    };
 
     sqlx::query("UPDATE mail_operations SET status = 'in_progress', updated_at = ? WHERE id = ?")
         .bind(&now)
@@ -1057,7 +1069,87 @@ pub async fn process_mail_operations(
     Ok(())
 }
 
+async fn process_mail_flag_operation(
+    app: &tauri::AppHandle,
+    pool: &SqlitePool,
+    now: &str,
+) -> Result<(), String> {
+    // Archive/delete owns the thread while it is queued, so do not spend an
+    // IMAP round trip applying flags to mail about to leave the Inbox.
+    let item: Option<MailFlagOperation> = sqlx::query_as(
+        "SELECT id, thread_id, seen, starred, attempt_count, revision FROM mail_flag_operations \
+         WHERE status = 'pending' AND next_retry_at <= ? \
+           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = mail_flag_operations.thread_id AND o.status IN ('pending', 'in_progress')) \
+         ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(item) = item else { return Ok(()); };
+
+    sqlx::query("UPDATE mail_flag_operations SET status = 'in_progress', updated_at = ? WHERE id = ? AND revision = ?")
+        .bind(now)
+        .bind(&item.id)
+        .bind(item.revision)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let result = imap_sync_thread_flags(app, pool, &item.thread_id, item.seen, item.starred).await;
+    match result {
+        Ok(()) => {
+            // A newer local toggle may have arrived while IMAP was running.
+            // In that case its higher revision remains pending for a later run.
+            sqlx::query("DELETE FROM mail_flag_operations WHERE id = ? AND revision = ?")
+                .bind(&item.id)
+                .bind(item.revision)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Err(error) => {
+            let attempts = item.attempt_count + 1;
+            let status = if attempts >= MAX_OPERATION_ATTEMPTS { "failed" } else { "pending" };
+            let delay_secs = match attempts { 1 => 10, 2 => 30, _ => 0 };
+            let retry_at = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
+            let updated = sqlx::query(
+                "UPDATE mail_flag_operations SET status = ?, attempt_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND revision = ?",
+            )
+            .bind(status)
+            .bind(attempts)
+            .bind(retry_at)
+            .bind(&error)
+            .bind(Utc::now().to_rfc3339())
+            .bind(&item.id)
+            .bind(item.revision)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if status == "failed" && updated.rows_affected() > 0 {
+                let _ = app.emit(
+                    "mail-operation-failed",
+                    MailOperationFailure {
+                        thread_id: item.thread_id,
+                        operation: "flags".to_string(),
+                        error,
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn start_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailOperationWorker) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = process_mail_operations(&app, &pool, &worker).await {
+            eprintln!("Unable to process queued Gmail operation: {error}");
+        }
+    });
+}
+
+fn start_delayed_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailOperationWorker) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(OPERATION_UNDO_WINDOW_SECONDS as u64)).await;
         if let Err(error) = process_mail_operations(&app, &pool, &worker).await {
@@ -1103,7 +1195,7 @@ pub async fn archive_thread(
     thread_id: String,
 ) -> Result<(), String> {
     enqueue_mail_operation(pool.inner(), &thread_id, "archive").await?;
-    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
+    start_delayed_operation_worker(app, pool.inner().clone(), worker.inner().clone());
     Ok(())
 }
 
@@ -1116,7 +1208,7 @@ pub async fn delete_thread(
 ) -> Result<(), String> {
     // UID MOVE to [Gmail]/Trash explicitly puts the message in Gmail Trash.
     enqueue_mail_operation(pool.inner(), &thread_id, "trash").await?;
-    start_operation_worker(app, pool.inner().clone(), worker.inner().clone());
+    start_delayed_operation_worker(app, pool.inner().clone(), worker.inner().clone());
     Ok(())
 }
 

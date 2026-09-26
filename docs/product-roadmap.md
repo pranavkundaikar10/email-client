@@ -103,5 +103,9 @@ glance.
   has already reached Archive or Trash before retrying an uncertain operation.
 - Add a persistent “actions needing attention” surface for failed Gmail
   operations, including Retry and Dismiss controls.
+- Add local Trash retention and reconciliation: retain locally trashed threads
+  for roughly 30–35 days, periodically confirm their presence in Gmail Trash,
+  then permanently remove local thread, message, analysis, and review records
+  once Gmail has removed them.
 - Add regression tests for MIME body selection, the durable Gmail outbox, and
   shared optimistic mail actions.

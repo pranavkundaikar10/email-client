@@ -39,7 +39,10 @@ struct MessageMeta {
     from_name: String,
     from_email: String,
     to_emails: String, // JSON array of raw address strings
-    sent_at: String,
+    // Gmail's server-assigned IMAP INTERNALDATE. The legacy `sent_at` SQLite
+    // column is intentionally populated with this recipient-facing time so
+    // every existing view orders exactly as Gmail does.
+    received_at: String,
     unread: bool,
     starred: bool,
     is_newsletter: bool,
@@ -113,7 +116,7 @@ fn fetch_headers_query(
         .collect::<Vec<_>>()
         .join(",");
 
-    let fetch_items = "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])";
+    let fetch_items = "(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])";
     // uid_fetch uses persistent UIDs — stable across sessions
     let messages = session
         .uid_fetch(&uid_set, fetch_items)
@@ -153,7 +156,13 @@ fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetc
         let date_raw = parsed.as_ref()
             .and_then(|p| p.headers.get_first_value("Date"))
             .unwrap_or_default();
-        let sent_at = parse_date(&date_raw);
+        // INTERNALDATE is assigned by Gmail when it accepts the message and
+        // is the timestamp Gmail uses for mailbox ordering. Only malformed or
+        // non-conforming servers need the RFC Date header fallback.
+        let received_at = msg
+            .internal_date()
+            .map(|date| date.with_timezone(&Utc).to_rfc3339())
+            .unwrap_or_else(|| parse_date(&date_raw));
 
         let message_id = parsed.as_ref()
             .and_then(|p| p.headers.get_first_value("Message-ID"))
@@ -173,7 +182,7 @@ fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetc
 
         result.push(MessageMeta {
             imap_uid, message_id, thread_id, subject, snippet,
-            from_name, from_email, to_emails, sent_at, unread, starred,
+            from_name, from_email, to_emails, received_at, unread, starred,
             is_newsletter: newsletter,
         });
     }
@@ -215,7 +224,7 @@ fn fetch_folder_headers(email: &str, password: &str, special_attr: &str, fallbac
     uids.truncate(SYNC_LIMIT);
     let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
 
-    let fetch_items = "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])";
+    let fetch_items = "(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])";
     let messages = session.uid_fetch(&uid_set, fetch_items).map_err(|e| e.to_string())?;
     let result = parse_fetched_messages(&messages);
     session.logout().ok();
@@ -260,7 +269,7 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
             "#,
         )
         .bind(&m.thread_id).bind(email).bind(&m.subject).bind(&m.snippet)
-        .bind(m.unread as i64).bind(m.starred as i64).bind(&m.sent_at).bind(&category).bind(folder)
+        .bind(m.unread as i64).bind(m.starred as i64).bind(&m.received_at).bind(&category).bind(folder)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -272,11 +281,13 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 imap_uid = CASE WHEN imap_uid = '' THEN excluded.imap_uid ELSE imap_uid END,
-                to_emails = CASE WHEN to_emails = '' OR to_emails = '[]' THEN excluded.to_emails ELSE to_emails END
+                to_emails = CASE WHEN to_emails = '' OR to_emails = '[]' THEN excluded.to_emails ELSE to_emails END,
+                -- Backfill old locally cached sender dates on the next header sync.
+                sent_at = excluded.sent_at
             "#,
         )
         .bind(&m.message_id).bind(&m.thread_id).bind(email)
-        .bind(&m.from_email).bind(&m.from_name).bind(&m.to_emails).bind(&m.subject).bind(&m.sent_at)
+        .bind(&m.from_email).bind(&m.from_name).bind(&m.to_emails).bind(&m.subject).bind(&m.received_at)
         .bind(m.unread as i64).bind(&m.imap_uid).bind(m.is_newsletter as i64)
         .execute(&mut *tx)
         .await
@@ -291,6 +302,18 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
         .await
         .map_err(|e| e.to_string())?;
     }
+
+    // Existing installs previously stored the sender's Date header. Rebuild
+    // each touched thread from the now-normalized message timestamps so a
+    // newer-but-delayed message cannot remain buried under stale metadata.
+    sqlx::query(
+        "UPDATE threads SET last_message_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = threads.id) WHERE account_id = ? AND folder = ?",
+    )
+    .bind(email)
+    .bind(folder)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(count)

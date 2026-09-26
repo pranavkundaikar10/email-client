@@ -27,6 +27,8 @@ export interface Message {
   subject: string;
   body_html: string | null;
   body_text: string | null;
+  // Recipient-facing delivery timestamp (IMAP INTERNALDATE). The legacy API
+  // field name is retained to avoid separate date behavior across views.
   sent_at: string;
   unread: boolean;
   body_fetched: boolean;

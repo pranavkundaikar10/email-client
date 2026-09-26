@@ -1397,7 +1397,11 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
 
     let text = text_candidates
         .into_iter()
-        .max_by_key(|body| body.trim().len());
+        .max_by_key(|body| body.trim().len())
+        // Some recruiting systems send HTML only. Keep a derived text version
+        // as a durable fallback if a particular sender's rich markup cannot be
+        // rendered by the local WebView.
+        .or_else(|| html.as_ref().map(|body| html2text::from_read(body.as_bytes(), 100)));
 
     (html, text, has_attachments)
 }

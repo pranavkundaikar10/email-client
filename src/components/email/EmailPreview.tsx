@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -13,6 +13,20 @@ import JobCategoryBadge from "../ui/JobCategoryBadge";
 // leak out and shift the host page layout.
 // Uses allow-scripts (no allow-same-origin) + postMessage bridge so link clicks
 // open in the system browser and height is reported without cross-origin access.
+function normalizeEmailHtml(html: string): string {
+  // Marketing and applicant-tracking systems commonly emit malformed legacy
+  // table markup. Parsing and serializing it once repairs broken attributes
+  // before it reaches the isolated document, while retaining email styling.
+  const document = new DOMParser().parseFromString(html, "text/html");
+  document.querySelectorAll("script, base, meta, link").forEach((element) => element.remove());
+  document.querySelectorAll("*").forEach((element) => {
+    for (const attribute of [...element.attributes]) {
+      if (attribute.name.toLowerCase().startsWith("on")) element.removeAttribute(attribute.name);
+    }
+  });
+  return document.body.innerHTML;
+}
+
 function IsolatedHtml({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(150);
@@ -21,7 +35,8 @@ function IsolatedHtml({ html }: { html: string }) {
     function onMessage(e: MessageEvent) {
       if (e.source !== ref.current?.contentWindow) return;
       if (e.data?.type === "height") {
-        setHeight((e.data.h as number) + 16);
+        const measured = Number(e.data.h);
+        if (Number.isFinite(measured)) setHeight(Math.max(80, measured + 16));
       } else if (e.data?.type === "open-url") {
         openUrl(String(e.data.url)).catch(() => {});
       }
@@ -30,14 +45,39 @@ function IsolatedHtml({ html }: { html: string }) {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  // Strip script tags from email content — we inject our own handler below.
-  const safeHtml = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+  const safeHtml = useMemo(() => normalizeEmailHtml(html), [html]);
 
   const srcdoc = `<!DOCTYPE html><html><head>
-<style>body{margin:0;font-family:sans-serif;font-size:14px;color:#374151;word-break:break-word}img{max-width:100%}</style>
+<style>
+html,body{margin:0;max-width:100%;overflow-wrap:anywhere}
+body{font-family:sans-serif;font-size:14px;color:#374151;word-break:break-word}
+table{max-width:100% !important}
+table.fullWidth,.fullWidth{min-width:0 !important;max-width:100% !important;width:100% !important}
+td,th{min-width:0 !important;overflow-wrap:anywhere}
+img{max-width:100% !important;height:auto !important}
+</style>
 </head><body>${safeHtml}<script>(function(){
-  function h(){window.parent.postMessage({type:'height',h:document.body.scrollHeight},'*');}
-  h(); window.addEventListener('load',h);
+  function h(){
+    var body=document.body, bodyTop=body.getBoundingClientRect().top, height=0;
+    // Do not use body/document scrollHeight here: when the iframe expands,
+    // those values can include the viewport itself and recursively add blank
+    // space. Measure the actual email elements instead.
+    for(var i=0;i<body.children.length;i++){
+      var rect=body.children[i].getBoundingClientRect();
+      height=Math.max(height,rect.bottom-bodyTop);
+    }
+    if(!height){
+      var range=document.createRange(); range.selectNodeContents(body);
+      height=range.getBoundingClientRect().height;
+    }
+    window.parent.postMessage({type:'height',h:Math.ceil(height)},'*');
+  }
+  // Email tables frequently reflow after the initial document load. Observe
+  // their final layout instead of measuring only the first rendered line.
+  h(); requestAnimationFrame(h); window.addEventListener('load',h);
+  window.addEventListener('resize',h);
+  if(window.ResizeObserver){new ResizeObserver(h).observe(document.body);}
+  setTimeout(h,50); setTimeout(h,250); setTimeout(h,1000);
   document.addEventListener('click',function(e){
     var el=e.target;
     while(el&&el.tagName!=='A')el=el.parentElement;
@@ -58,7 +98,8 @@ function IsolatedHtml({ html }: { html: string }) {
       ref={ref}
       srcDoc={srcdoc}
       sandbox="allow-scripts"
-      style={{ width: "100%", height, border: "none", display: "block" }}
+      scrolling="no"
+      style={{ width: "100%", height, border: "none", display: "block", overflow: "hidden" }}
     />
   );
 }

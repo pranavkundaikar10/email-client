@@ -42,8 +42,12 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
   useEffect(() => {
     const unlisten = listen<{ operation: string; error: string }>("mail-operation-failed", ({ payload }) => {
-      const action = payload.operation === "trash" ? "move the email to Gmail Trash" : "archive the email";
-      addToast(`Could not ${action}. It has been returned to your inbox.`);
+      if (payload.operation === "flags") {
+        addToast("Could not sync this email’s read/star status to Gmail.");
+      } else {
+        const action = payload.operation === "trash" ? "move the email to Gmail Trash" : "archive the email";
+        addToast(`Could not ${action}. It has been returned to your inbox.`);
+      }
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       console.warn("Queued Gmail operation failed:", payload.error);

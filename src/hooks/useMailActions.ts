@@ -44,7 +44,12 @@ export function useMailActions() {
     const remaining = state.threads.filter((thread) => !idSet.has(thread.id));
     if (state.selectedThreadId && idSet.has(state.selectedThreadId)) {
       const selectedIndex = state.threads.findIndex((thread) => thread.id === state.selectedThreadId);
-      const fallback = remaining[selectedIndex] ?? remaining[selectedIndex - 1] ?? null;
+      // Pick the next visible survivor in the *original* list, not the same
+      // numeric index in the shortened list. The latter skips emails whenever
+      // a bulk action removes entries before the active selection.
+      const fallback = state.threads.slice(selectedIndex + 1).find((thread) => !idSet.has(thread.id))
+        ?? state.threads.slice(0, selectedIndex).reverse().find((thread) => !idSet.has(thread.id))
+        ?? null;
       state.setSelectedThread(fallback?.id ?? null);
     }
     state.setThreads(remaining);

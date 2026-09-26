@@ -6,6 +6,7 @@ import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
+import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
 
 // Renders HTML email in an isolated iframe so its <style> tags cannot
 // leak out and shift the host page layout.
@@ -276,6 +277,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     queryFn: () => api.getMessages(selectedThreadId!),
     enabled: !!selectedThreadId,
   });
+  useUpcomingBodyPrefetch(email);
 
   const { data: reviewQueue = [] } = useQuery({
     queryKey: ["review_queue", "priority"],

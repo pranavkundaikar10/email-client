@@ -154,6 +154,9 @@ export const api = {
   fetchMessageBody: (email: string, messageId: string, force = false) =>
     invoke<Message>("fetch_message_body", { email, messageId, force }),
 
+  prefetchThreadBodies: (email: string, threadIds: string[]) =>
+    invoke<number>("prefetch_thread_bodies", { email, threadIds }),
+
   getSplits: () =>
     invoke<Array<Split & { rules: string }>>("get_splits"),
 

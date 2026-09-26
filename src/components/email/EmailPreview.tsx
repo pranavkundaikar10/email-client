@@ -7,6 +7,7 @@ import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
 import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
+import JobCategoryBadge from "../ui/JobCategoryBadge";
 
 // Renders HTML email in an isolated iframe so its <style> tags cannot
 // leak out and shift the host page layout.
@@ -223,6 +224,10 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
           <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-500">
             <Sparkles size={12} />
             AI analysis
+            <JobCategoryBadge
+              isJobRelated={analysis.is_job_related}
+              category={analysis.job_category}
+            />
           </div>
           <p className={`mt-1.5 text-sm font-medium leading-relaxed ${
             analysis.is_actionable ? "text-indigo-800" : "text-gray-700"

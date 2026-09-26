@@ -60,6 +60,8 @@ export interface ThreadAnalysis {
   is_actionable: boolean;
   importance: number; // 1-5
   category: AnalysisCategory | string;
+  is_job_related: boolean;
+  job_category: string | null;
   summary: string;
   action_items: string; // JSON-encoded string[]
   deadline: string | null;

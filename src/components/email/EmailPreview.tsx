@@ -98,7 +98,7 @@ function MessageCard({
     if (!isLast || isPending) return;
     if (!message.body_fetched) {
       fetchBody(false);
-    } else if (!refreshedEmptyHtml.current && message.body_text && !hasMeaningfulHtml(message.body_html)) {
+    } else if (!refreshedEmptyHtml.current && !hasMeaningfulHtml(message.body_html)) {
       // Re-fetch old cached emails that were parsed before the richer MIME
       // selection existed. This happens once and preserves the plain-text
       // fallback if the sender genuinely supplied no useful HTML.
@@ -277,8 +277,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   });
 
   const { data: reviewQueue = [] } = useQuery({
-    queryKey: ["review_queue"],
-    queryFn: () => api.getReviewQueue(),
+    queryKey: ["review_queue", "priority"],
+    queryFn: () => api.getReviewQueue(50, "priority"),
     enabled: reviewMode,
   });
   const reviewItem = reviewQueue.find((item) => item.thread_id === selectedThreadId);

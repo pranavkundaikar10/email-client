@@ -476,8 +476,9 @@ pub async fn get_auto_analysis_candidates(
     .map_err(|e| e.to_string())
 }
 
-/// The review queue contains today's analyzed inbox threads until the user
-/// explicitly keeps, follows up on, or archives them.
+/// The review queue shows the newest seven-day block with unresolved analyzed
+/// inbox threads. Once it is cleared, it automatically moves to the next older
+/// block without causing the background analyzer to process old mail.
 #[tauri::command]
 pub async fn get_review_queue(
     pool: tauri::State<'_, SqlitePool>,
@@ -490,7 +491,7 @@ pub async fn get_review_queue(
         Some("newest") => "t.last_message_at DESC",
         _ => "a.importance DESC, t.last_message_at DESC",
     };
-    let today_start = chrono::Local::now()
+    let mut review_window_start = (chrono::Local::now() - chrono::Duration::days(6))
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
@@ -512,18 +513,36 @@ pub async fn get_review_queue(
         LEFT JOIN email_reviews r ON r.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
-          AND t.last_message_at >= ? AND r.thread_id IS NULL
+          AND t.last_message_at >= ? AND t.last_message_at < ?
+          AND r.thread_id IS NULL
         ORDER BY {order_by}
         LIMIT ?
         "#
         .replace("{order_by}", order_by);
 
-    sqlx::query_as::<_, ReviewItem>(&query)
-    .bind(today_start)
-    .bind(limit)
-    .fetch_all(pool.inner())
-    .await
-    .map_err(|e| e.to_string())
+    let mut review_window_end = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    // At most five years of weekly windows. The usual path is one query, and
+    // this makes clearing a batch naturally reveal the next unresolved batch.
+    for _ in 0..261 {
+        let rows = sqlx::query_as::<_, ReviewItem>(&query)
+            .bind(&review_window_start)
+            .bind(&review_window_end)
+            .bind(limit)
+            .fetch_all(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
+        if !rows.is_empty() {
+            return Ok(rows);
+        }
+
+        review_window_end = review_window_start;
+        let previous_start = chrono::DateTime::parse_from_rfc3339(&review_window_end)
+            .map(|time| (time - chrono::Duration::days(7)).to_rfc3339())
+            .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::days(13)).to_rfc3339());
+        review_window_start = previous_start;
+    }
+
+    Ok(Vec::new())
 }
 
 #[tauri::command]

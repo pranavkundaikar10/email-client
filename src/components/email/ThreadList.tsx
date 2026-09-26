@@ -4,6 +4,8 @@ import { api, type Thread } from "../../lib/api";
 import ThreadItem from "./ThreadItem";
 import { useAppStore } from "../../store";
 import { useMailActions } from "../../hooks/useMailActions";
+import { useVisibleThreadList } from "../../hooks/useVisibleThreadList";
+import BulkActionBar from "./BulkActionBar";
 
 const PAGE_SIZE = 50;
 
@@ -17,7 +19,6 @@ interface Props {
 export default function ThreadList({ activeView, effectiveSplitId, searchResults, isSearching }: Props) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
-  const setThreads = useAppStore((s) => s.setThreads);
   const checkedThreadIds = useAppStore((s) => s.checkedThreadIds);
   const toggleThreadCheck = useAppStore((s) => s.toggleThreadCheck);
   const clearChecked = useAppStore((s) => s.clearChecked);
@@ -52,9 +53,7 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
     [isSearching, searchResults, inboxThreads]
   );
 
-  useEffect(() => {
-    setThreads(visibleThreads);
-  }, [visibleThreads]);
+  useVisibleThreadList(visibleThreads);
 
   useEffect(() => {
     if (!selectedThreadId) return;
@@ -141,32 +140,12 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Bulk action toolbar */}
-      {(checkedThreadIds?.size ?? 0) > 0 && (
-        <div className="flex items-center gap-3 px-4 py-2 bg-indigo-50 border-b border-indigo-100 flex-shrink-0">
-          <span className="text-xs text-indigo-700 font-medium flex-1">
-            {checkedThreadIds?.size ?? 0} selected
-          </span>
-          <button
-            onClick={handleBulkArchive}
-            className="text-xs text-gray-600 hover:text-gray-900 font-medium transition-colors"
-          >
-            Archive
-          </button>
-          <button
-            onClick={handleBulkDelete}
-            className="text-xs text-red-500 hover:text-red-700 font-medium transition-colors"
-          >
-            Delete
-          </button>
-          <button
-            onClick={clearChecked}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-          >
-            Clear
-          </button>
-        </div>
-      )}
+      <BulkActionBar
+        count={checkedThreadIds?.size ?? 0}
+        onArchive={handleBulkArchive}
+        onDelete={handleBulkDelete}
+        onClear={clearChecked}
+      />
 
       {!isSearching && isLoading ? (
         <div className="flex-1 flex items-center justify-center text-sm text-gray-400">

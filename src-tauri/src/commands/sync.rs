@@ -1028,14 +1028,12 @@ fn parse_date(raw: &str) -> String {
 fn html_visible_content_score(html: &str) -> usize {
     // Email senders sometimes include an empty text/html placeholder before
     // the real rich part. Score visible content rather than accepting the
-    // first HTML leaf in the MIME tree.
-    let without_non_visible = html
-        .split("<style")
-        .next()
-        .unwrap_or(html)
-        .split("<script")
-        .next()
-        .unwrap_or(html);
+    // first HTML leaf in the MIME tree. Remove non-visible *blocks* without
+    // truncating the email at a <style> in its <head>.
+    let without_non_visible = remove_html_blocks(html, "style");
+    let without_non_visible = remove_html_blocks(&without_non_visible, "script");
+    let lower = without_non_visible.to_ascii_lowercase();
+    let visual_element_score = lower.matches("<img").count() * 10;
     let visible: String = without_non_visible
         .chars()
         .scan(false, |inside_tag, c| {
@@ -1048,7 +1046,28 @@ fn html_visible_content_score(html: &str) -> usize {
         })
         .filter(|c| !c.is_whitespace() && *c != '\u{00a0}')
         .collect();
-    visible.len()
+    visible.len() + visual_element_score
+}
+
+fn remove_html_blocks(html: &str, tag: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let open = format!("<{}", tag);
+    let close = format!("</{}", tag);
+    let mut result = String::with_capacity(html.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = lower[cursor..].find(&open) {
+        let start = cursor + relative_start;
+        result.push_str(&html[cursor..start]);
+        let Some(open_end_relative) = lower[start..].find('>') else { break; };
+        let after_open = start + open_end_relative + 1;
+        let Some(close_relative) = lower[after_open..].find(&close) else { break; };
+        let close_start = after_open + close_relative;
+        let Some(close_end_relative) = lower[close_start..].find('>') else { break; };
+        cursor = close_start + close_end_relative + 1;
+    }
+    result.push_str(&html[cursor..]);
+    result
 }
 
 struct HtmlCandidate {
@@ -1151,4 +1170,21 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
         .max_by_key(|body| body.trim().len());
 
     (html, text, has_attachments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::html_visible_content_score;
+
+    #[test]
+    fn html_with_head_styles_and_body_image_is_meaningful() {
+        let html = r#"<html><head><style>body { color: red; }</style></head>
+            <body><img src="https://example.test/hero.jpg" alt="Branch closed" /></body></html>"#;
+        assert!(html_visible_content_score(html) > 0);
+    }
+
+    #[test]
+    fn empty_html_shell_is_not_meaningful() {
+        assert_eq!(html_visible_content_score("<html><head><style></style></head><body></body></html>"), 0);
+    }
 }

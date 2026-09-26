@@ -63,6 +63,7 @@ function IsolatedHtml({ html }: { html: string }) {
 
 function hasMeaningfulHtml(html: string | null): boolean {
   if (!html) return false;
+  if (/<img\b|background(?:-image)?\s*:/i.test(html)) return true;
   const visible = html
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")

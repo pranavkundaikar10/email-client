@@ -10,7 +10,8 @@ In particular:
 
 - Thread-list views must reuse shared selection state and bulk-action UI.
 - Gmail-changing actions must go through `src/hooks/useMailActions.ts`; do not
-  call archive/delete API methods directly from a view.
+  call archive/delete API methods directly from a view. That shared path owns
+  optimistic updates, durable delivery, and the standard 8-second Undo window.
 - When a behavior is shared by more than one view, extract it into a focused
   reusable component or hook before adding another view-specific version.
 - Keep cache updates, optimistic UI behavior, failure recovery, and keyboard

@@ -40,6 +40,7 @@ pub fn run() {
             sync::prefetch_thread_bodies,
             sync::archive_thread,
             sync::delete_thread,
+            sync::cancel_mail_operations,
             sync::process_pending_mail_operations,
             sync::star_thread,
             splits::get_splits,

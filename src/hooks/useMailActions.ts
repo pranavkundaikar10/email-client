@@ -29,6 +29,23 @@ function withoutThreads(data: unknown, ids: Set<string>): unknown {
 export function useMailActions() {
   const queryClient = useQueryClient();
 
+  const undo = useCallback(async (ids: string[]) => {
+    const restored = await api.cancelMailOperations(ids);
+    if (restored === 0) {
+      useAppStore.getState().addToast("This action is already being synced to Gmail.");
+      return;
+    }
+    await Promise.all([
+      queryClient.refetchQueries({ queryKey: ["threads"] }),
+      queryClient.refetchQueries({ queryKey: ["review_queue"] }),
+      queryClient.refetchQueries({ queryKey: ["search"] }),
+      queryClient.refetchQueries({ queryKey: ["digest"] }),
+    ]);
+    useAppStore.getState().addToast(
+      restored === 1 ? "Email restored" : `${restored} emails restored`
+    );
+  }, [queryClient]);
+
   const queue = useCallback(async (action: MailAction, threadIds: string[]) => {
     const ids = [...new Set(threadIds)];
     if (ids.length === 0) return;
@@ -76,7 +93,13 @@ export function useMailActions() {
     void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
     void queryClient.invalidateQueries({ queryKey: ["search"] });
     void queryClient.invalidateQueries({ queryKey: ["digest"] });
-  }, [queryClient]);
+
+    const label = action === "archive" ? "Archived" : "Moved to Gmail Trash";
+    useAppStore.getState().addToast(
+      ids.length === 1 ? label : `${label} · ${ids.length} emails`,
+      { actionLabel: "Undo", onAction: () => undo(ids), duration: 8_000 }
+    );
+  }, [queryClient, undo]);
 
   return {
     archiveThreads: (threadIds: string[]) => queue("archive", threadIds),

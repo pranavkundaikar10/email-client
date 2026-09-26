@@ -127,6 +127,9 @@ export const api = {
   deleteThread: (threadId: string) =>
     invoke<void>("delete_thread", { threadId: threadId }),
 
+  cancelMailOperations: (threadIds: string[]) =>
+    invoke<number>("cancel_mail_operations", { threadIds }),
+
   processPendingMailOperations: () =>
     invoke<void>("process_pending_mail_operations"),
 

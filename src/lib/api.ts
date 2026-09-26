@@ -151,8 +151,8 @@ export const api = {
   syncDrafts: (email: string) =>
     invoke<number>("sync_drafts", { email }),
 
-  fetchMessageBody: (email: string, messageId: string) =>
-    invoke<Message>("fetch_message_body", { email, messageId }),
+  fetchMessageBody: (email: string, messageId: string, force = false) =>
+    invoke<Message>("fetch_message_body", { email, messageId, force }),
 
   getSplits: () =>
     invoke<Array<Split & { rules: string }>>("get_splits"),

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArrowRight, Bookmark, CalendarClock, Check, Eye, X } from "lucide-react";
 import { api, type ReviewItem } from "../../lib/api";
 import { useAppStore } from "../../store";
+import { useMailActions } from "../../hooks/useMailActions";
 
 function actionItems(json: string): string[] {
   try {
@@ -33,6 +34,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
   const addToast = useAppStore((s) => s.addToast);
   const [offset, setOffset] = useState(0);
   const [saving, setSaving] = useState(false);
+  const { archiveThread } = useMailActions();
   const { data: queue = [], isLoading } = useQuery({
     queryKey: ["review_queue"],
     queryFn: () => api.getReviewQueue(),
@@ -43,7 +45,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
     if (!item) return;
     setSaving(true);
     try {
-      if (decision === "archived") await api.archiveThread(item.thread_id);
+      if (decision === "archived") await archiveThread(item.thread_id);
       await api.recordReviewDecision(item.thread_id, decision);
       await queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       await queryClient.invalidateQueries({ queryKey: ["threads"] });

@@ -3,6 +3,7 @@ import { useHotkeys } from "react-hotkeys-hook";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAppStore } from "../store";
 import { api } from "../lib/api";
+import { useMailActions } from "./useMailActions";
 
 type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts";
 
@@ -17,10 +18,10 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
-  const selectNextOrPrev = useAppStore((s) => s.selectNextOrPrev);
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const queryClient = useQueryClient();
+  const { archiveThreads, deleteThreads } = useMailActions();
 
   // J — next thread
   useHotkeys("j", (e) => {
@@ -37,21 +38,15 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
   // E — archive (bulk if any checked, otherwise single selected)
   useHotkeys("e", (e) => {
     e.preventDefault();
-    const { checkedThreadIds, clearChecked } = useAppStore.getState();
+    const { checkedThreadIds } = useAppStore.getState();
     if (checkedThreadIds.size > 0) {
       const ids = Array.from(checkedThreadIds);
-      clearChecked();
-      Promise.allSettled(ids.map((id) => api.archiveThread(id))).then(() => {
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
-      });
+      archiveThreads(ids).catch(() => {});
       return;
     }
     if (!selectedThreadId) return;
     const threadToArchive = selectedThreadId;
-    selectNextOrPrev();
-    api.archiveThread(threadToArchive).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    });
+    archiveThreads([threadToArchive]).catch(() => {});
   }, { enableOnFormTags: false });
 
   // X — toggle check on selected thread
@@ -67,18 +62,15 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
       if (e.key !== "#") return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-      const { checkedThreadIds, clearChecked } = useAppStore.getState();
+      const { checkedThreadIds } = useAppStore.getState();
       if (checkedThreadIds.size === 0) return; // let EmailPreview handle single-thread
       e.preventDefault();
       const ids = Array.from(checkedThreadIds);
-      clearChecked();
-      Promise.allSettled(ids.map((id) => api.deleteThread(id))).then(() => {
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
-      });
+      deleteThreads(ids).catch(() => {});
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [queryClient]);
+  }, [deleteThreads]);
 
   // S — star/unstar selected thread
   useHotkeys("s", (e) => {

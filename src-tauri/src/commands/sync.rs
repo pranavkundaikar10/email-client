@@ -2,6 +2,7 @@ use imap::Session;
 use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::Arc;
 use chrono::Utc;
@@ -529,6 +530,94 @@ pub async fn fetch_message_body(
         .into_iter()
         .find(|m| m.id == message_id_clone)
         .ok_or_else(|| "Message not found after fetch".to_string())
+}
+
+#[derive(sqlx::FromRow)]
+struct PrefetchMessageRow {
+    id: String,
+    imap_uid: String,
+    folder: String,
+}
+
+/// Fetch up to three upcoming thread bodies over one IMAP connection. This is
+/// deliberately read-only (BODY.PEEK) and never invokes local AI processing.
+#[tauri::command]
+pub async fn prefetch_thread_bodies(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    email: String,
+    thread_ids: Vec<String>,
+) -> Result<usize, String> {
+    let thread_ids: Vec<String> = thread_ids.into_iter().take(3).collect();
+    if thread_ids.is_empty() { return Ok(0); }
+
+    let placeholders = std::iter::repeat("?")
+        .take(thread_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"SELECT m.id, m.imap_uid, t.folder
+           FROM messages m JOIN threads t ON t.id = m.thread_id
+           WHERE m.thread_id IN ({placeholders})
+             AND t.account_id = ?
+             AND m.body_fetched = 0
+             AND m.imap_uid != ''
+             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = m.thread_id)
+           LIMIT 3"#,
+    );
+    let mut query = sqlx::query_as::<_, PrefetchMessageRow>(&sql);
+    for thread_id in &thread_ids { query = query.bind(thread_id); }
+    let mut rows = query.bind(&email).fetch_all(pool.inner()).await.map_err(|e| e.to_string())?;
+    let Some(first) = rows.first() else { return Ok(0); };
+
+    // A sidebar normally contains one folder. Search can mix folders, so only
+    // prefetch the matching folder here rather than opening extra connections.
+    let folder = first.folder.clone();
+    rows.retain(|row| row.folder == folder);
+    let uid_to_id: HashMap<u32, String> = rows.iter()
+        .filter_map(|row| row.imap_uid.parse::<u32>().ok().map(|uid| (uid, row.id.clone())))
+        .collect();
+    if uid_to_id.is_empty() { return Ok(0); }
+
+    let password = crate::commands::auth::load_password(&app, &email)?;
+    let uid_set = uid_to_id.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let fetched = tokio::task::spawn_blocking(move || {
+        let mut session = connect(&email, &password)?;
+        let mailbox = match folder.as_str() {
+            "sent" => find_special_mailbox(&mut session, "\\Sent").unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "drafts" => find_special_mailbox(&mut session, "\\Drafts").unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            _ => "INBOX".to_string(),
+        };
+        session.select(&mailbox).map_err(|e| e.to_string())?;
+        let responses = session.uid_fetch(&uid_set, "BODY.PEEK[]").map_err(|e| e.to_string())?;
+        let mut bodies = Vec::new();
+        for response in responses.iter() {
+            let Some(uid) = response.uid else { continue; };
+            let Some(message_id) = uid_to_id.get(&uid) else { continue; };
+            let Some(raw) = response.body() else { continue; };
+            let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
+            let (html, text, attachments) = extract_body_parts(&parsed);
+            bodies.push((message_id.clone(), html, text, attachments));
+        }
+        session.logout().ok();
+        Ok::<_, String>(bodies)
+    }).await.map_err(|e| e.to_string())??;
+
+    let mut saved = 0;
+    for (message_id, body_html, body_text, has_attachments) in fetched {
+        let result = sqlx::query(
+            "UPDATE messages SET body_html = ?, body_text = ?, has_attachments = ?, body_fetched = 1 WHERE id = ? AND body_fetched = 0",
+        )
+        .bind(body_html)
+        .bind(body_text)
+        .bind(has_attachments as i64)
+        .bind(message_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+        saved += result.rows_affected() as usize;
+    }
+    Ok(saved)
 }
 
 // Find a special-use mailbox by its RFC 6154 attribute (e.g. "\\Trash", "\\Sent").

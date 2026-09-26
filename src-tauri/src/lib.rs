@@ -37,6 +37,7 @@ pub fn run() {
             sync::sync_sent,
             sync::sync_drafts,
             sync::fetch_message_body,
+            sync::prefetch_thread_bodies,
             sync::archive_thread,
             sync::delete_thread,
             sync::process_pending_mail_operations,

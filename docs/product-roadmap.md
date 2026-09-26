@@ -109,3 +109,7 @@ glance.
   once Gmail has removed them.
 - Add regression tests for MIME body selection, the durable Gmail outbox, and
   shared optimistic mail actions.
+- Refine body prefetching for rapid keyboard triage: use a priority queue that
+  fetches the active email first, immediately queues the next one or two, caps
+  background work at two fetches, and cancels stale low-priority work when the
+  user jumps elsewhere.

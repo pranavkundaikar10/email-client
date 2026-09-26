@@ -101,6 +101,16 @@ struct OllamaRequest<'a> {
     messages: Vec<OllamaMessage<'a>>,
     format: &'a str,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
+    num_predict: usize,
+    temperature: f32,
 }
 
 #[derive(Serialize)]
@@ -212,6 +222,7 @@ async fn call_model(
     base_url: &str,
     model: &str,
     user_prompt: String,
+    think: Option<bool>,
 ) -> Result<ModelPayload, String> {
     let client = reqwest::Client::new();
     let req = OllamaRequest {
@@ -222,6 +233,15 @@ async fn call_model(
         ],
         format: "json",
         stream: false,
+        think,
+        // The background queue only needs a compact structured decision. When
+        // thinking is disabled this cap applies to the final JSON response,
+        // preventing a malformed or overly verbose reply from monopolizing
+        // the local model.
+        options: think.map(|thinking_enabled| (!thinking_enabled).then_some(OllamaOptions {
+            num_predict: 160,
+            temperature: 0.0,
+        })).flatten(),
     };
 
     let resp = client
@@ -296,6 +316,7 @@ pub async fn analyze_thread(
     thread_id: String,
     model: Option<String>,
     base_url: Option<String>,
+    think: Option<bool>,
 ) -> Result<AnalysisRow, String> {
     let model = match model {
         Some(model) => model,
@@ -307,7 +328,7 @@ pub async fn analyze_thread(
         latest_message_text(pool.inner(), &thread_id).await?;
 
     let prompt = build_user_prompt(&from_name, &from_email, &subject, &body, has_attachments);
-    let mut payload = call_model(&base_url, &model, prompt).await?;
+    let mut payload = call_model(&base_url, &model, prompt, think).await?;
 
     // An attached document may contain the actual assessment, contract, or
     // request. Until attachment extraction exists, never let the model label
@@ -439,6 +460,7 @@ pub async fn analyze_inbox(
     model: Option<String>,
     base_url: Option<String>,
     limit: Option<i64>,
+    think: Option<bool>,
 ) -> Result<Vec<AnalysisRow>, String> {
     let limit = limit.unwrap_or(25);
 
@@ -461,7 +483,7 @@ pub async fn analyze_inbox(
 
     let mut results = Vec::new();
     for thread_id in stale_thread_ids {
-        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone()).await {
+        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone(), think).await {
             Ok(row) => results.push(row),
             Err(e) => {
                 // Don't let one unparseable/unreachable email kill the batch.

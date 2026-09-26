@@ -182,11 +182,11 @@ export const api = {
 
   // Agent — local-LLM email triage. `model`/`baseUrl` are optional overrides
   // for the Ollama model name / server URL (defaults live on the Rust side).
-  analyzeThread: (threadId: string, model?: string, baseUrl?: string) =>
-    invoke<ThreadAnalysis>("analyze_thread", { threadId, model, baseUrl }),
+  analyzeThread: (threadId: string, model?: string, baseUrl?: string, think?: boolean) =>
+    invoke<ThreadAnalysis>("analyze_thread", { threadId, model, baseUrl, think }),
 
-  analyzeInbox: (model?: string, baseUrl?: string, limit?: number) =>
-    invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit }),
+  analyzeInbox: (model?: string, baseUrl?: string, limit?: number, think?: boolean) =>
+    invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit, think }),
 
   getOllamaModels: () =>
     invoke<OllamaModel[]>("get_ollama_models"),

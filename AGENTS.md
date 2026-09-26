@@ -27,6 +27,9 @@ In particular:
 - Job-search stage badges must use the persisted `is_job_related` and
   `job_category` analysis fields through `JobCategoryBadge`; do not infer or
   display a job stage from a general triage category in a view.
+- Automatic background AI triage must call Ollama with thinking disabled and a
+  bounded final response. Manual analysis retains the model default so users
+  can choose a deeper review when needed.
 
 ## Before handoff
 

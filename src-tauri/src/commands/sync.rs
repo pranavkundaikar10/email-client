@@ -19,6 +19,9 @@ const GMAIL_IMAP_PORT: u16 = 993;
 const SYNC_DAYS: i64 = 365;
 const SYNC_LIMIT: usize = 2000;
 const MAX_OPERATION_ATTEMPTS: i64 = 3;
+// Gmail changes are intentionally held briefly so the client can offer a
+// reliable Undo action before any remote state is changed.
+const OPERATION_UNDO_WINDOW_SECONDS: i64 = 8;
 
 /// Ensures Gmail-changing operations run one at a time, even when several
 /// buttons or keyboard shortcuts are pressed in quick succession.
@@ -935,7 +938,9 @@ async fn enqueue_mail_operation(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Email thread no longer exists locally".to_string())?;
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let execute_after = (now + chrono::Duration::seconds(OPERATION_UNDO_WINDOW_SECONDS)).to_rfc3339();
+    let now = now.to_rfc3339();
 
     // One current intent per thread. Repeating an action is safe and puts a
     // previously failed attempt back into the queue.
@@ -955,7 +960,7 @@ async fn enqueue_mail_operation(
     .bind(account_id)
     .bind(thread_id)
     .bind(operation)
-    .bind(&now)
+    .bind(&execute_after)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -1054,6 +1059,7 @@ pub async fn process_mail_operations(
 
 fn start_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailOperationWorker) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(OPERATION_UNDO_WINDOW_SECONDS as u64)).await;
         if let Err(error) = process_mail_operations(&app, &pool, &worker).await {
             eprintln!("Unable to process queued Gmail operation: {error}");
         }
@@ -1067,6 +1073,26 @@ pub async fn process_pending_mail_operations(
     worker: tauri::State<'_, MailOperationWorker>,
 ) -> Result<(), String> {
     process_mail_operations(&app, pool.inner(), worker.inner()).await
+}
+
+/// Cancels still-pending intents during the Undo window. Once an operation is
+/// in progress, Gmail may already be changing it, so it is deliberately not
+/// cancelled here.
+#[tauri::command]
+pub async fn cancel_mail_operations(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_ids: Vec<String>,
+) -> Result<usize, String> {
+    if thread_ids.is_empty() { return Ok(0); }
+    let placeholders = std::iter::repeat("?")
+        .take(thread_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!("DELETE FROM mail_operations WHERE status = 'pending' AND thread_id IN ({placeholders})");
+    let mut request = sqlx::query(&query);
+    for thread_id in thread_ids { request = request.bind(thread_id); }
+    let result = request.execute(pool.inner()).await.map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() as usize)
 }
 
 #[tauri::command]

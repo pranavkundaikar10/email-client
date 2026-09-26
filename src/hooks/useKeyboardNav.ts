@@ -49,6 +49,12 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
     archiveThreads([threadToArchive]).catch(() => {});
   }, { enableOnFormTags: false });
 
+  // Z — undo the latest still-available archive/delete action.
+  useHotkeys("z", (e) => {
+    e.preventDefault();
+    void useAppStore.getState().undoLatestToast();
+  }, { enableOnFormTags: false });
+
   // X — toggle check on selected thread
   useHotkeys("x", (e) => {
     e.preventDefault();

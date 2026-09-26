@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useMailActions } from "../../hooks/useMailActions";
 
 // Renders HTML email in an isolated iframe so its <style> tags cannot
 // leak out and shift the host page layout.
@@ -60,6 +61,16 @@ function IsolatedHtml({ html }: { html: string }) {
   );
 }
 
+function hasMeaningfulHtml(html: string | null): boolean {
+  if (!html) return false;
+  const visible = html
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|\s/g, "");
+  return visible.length > 0;
+}
+
 function formatFullDate(iso: string): string {
   return new Date(iso).toLocaleString([], {
     weekday: "short", month: "short", day: "numeric",
@@ -75,16 +86,26 @@ function MessageCard({
   const queryClient = useQueryClient();
   const [replyOpen, setReplyOpen] = useState(false);
 
-  const { mutate: fetchBody, isPending, error: fetchError } = useMutation({
-    mutationFn: () => api.fetchMessageBody(email, message.id),
+  const { mutate: fetchBody, isPending, error: fetchError } = useMutation<Message, Error, boolean>({
+    mutationFn: (force) => api.fetchMessageBody(email, message.id, force),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["messages", message.thread_id] });
     },
   });
 
+  const refreshedEmptyHtml = useRef(false);
   useEffect(() => {
-    if (isLast && !message.body_fetched) fetchBody();
-  }, [isLast, message.body_fetched]);
+    if (!isLast || isPending) return;
+    if (!message.body_fetched) {
+      fetchBody(false);
+    } else if (!refreshedEmptyHtml.current && message.body_text && !hasMeaningfulHtml(message.body_html)) {
+      // Re-fetch old cached emails that were parsed before the richer MIME
+      // selection existed. This happens once and preserves the plain-text
+      // fallback if the sender genuinely supplied no useful HTML.
+      refreshedEmptyHtml.current = true;
+      fetchBody(true);
+    }
+  }, [isLast, isPending, message.body_fetched, message.body_html, message.body_text, fetchBody]);
 
   const toList = (() => {
     try { return (JSON.parse(message.to_emails) as string[]).join(", "); }
@@ -117,7 +138,7 @@ function MessageCard({
           </p>
         ) : isPending && !message.body_fetched ? (
           <p className="text-xs text-gray-400">Loading…</p>
-        ) : message.body_html ? (
+        ) : message.body_html && hasMeaningfulHtml(message.body_html) ? (
           <IsolatedHtml html={message.body_html} />
         ) : message.body_text ? (
           <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
@@ -244,10 +265,10 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
-  const selectNextOrPrev = useAppStore((s) => s.selectNextOrPrev);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const addToast = useAppStore((s) => s.addToast);
   const queryClient = useQueryClient();
+  const { archiveThread: queueArchiveThread, deleteThread: queueDeleteThread } = useMailActions();
 
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["messages", selectedThreadId],
@@ -263,20 +284,12 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   const reviewItem = reviewQueue.find((item) => item.thread_id === selectedThreadId);
 
   const { mutate: archive, isPending: archiving } = useMutation({
-    mutationFn: (threadId: string) => api.archiveThread(threadId),
-    onSuccess: () => {
-      selectNextOrPrev();
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    },
+    mutationFn: (threadId: string) => queueArchiveThread(threadId),
     onError: (err) => addToast(`Archive failed: ${String(err)}`),
   });
 
   const { mutate: deleteThread, isPending: deleting } = useMutation({
-    mutationFn: (threadId: string) => api.deleteThread(threadId),
-    onSuccess: () => {
-      selectNextOrPrev();
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    },
+    mutationFn: (threadId: string) => queueDeleteThread(threadId),
     onError: (err) => addToast(`Delete failed: ${String(err)}`),
   });
 
@@ -302,25 +315,19 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
 
   const { mutate: recordReview, isPending: savingReview } = useMutation({
     mutationFn: async ({ threadId, decision }: { threadId: string; decision: "keep" | "follow_up" | "archived" }) => {
-      if (decision === "archived") await api.archiveThread(threadId);
+      if (decision === "archived") await queueArchiveThread(threadId);
       await api.recordReviewDecision(threadId, decision);
     },
     onSuccess: (_, { decision }) => {
-      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
       addToast(decision === "archived" ? "Archive queued" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
-      selectNextOrPrev();
     },
     onError: (err) => addToast(`Could not save review decision: ${String(err)}`),
   });
 
   const { mutate: deleteFromReview, isPending: deletingFromReview } = useMutation({
-    mutationFn: (threadId: string) => api.deleteThread(threadId),
+    mutationFn: (threadId: string) => queueDeleteThread(threadId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
       addToast("Move to Gmail Trash queued");
-      selectNextOrPrev();
     },
     onError: (err) => addToast(`Could not delete email: ${String(err)}`),
   });

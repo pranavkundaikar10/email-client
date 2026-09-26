@@ -3,6 +3,7 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Thread } from "../../lib/api";
 import ThreadItem from "./ThreadItem";
 import { useAppStore } from "../../store";
+import { useMailActions } from "../../hooks/useMailActions";
 
 const PAGE_SIZE = 50;
 
@@ -23,6 +24,7 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
 
   const addToast = useAppStore((s) => s.addToast);
   const queryClient = useQueryClient();
+  const { archiveThreads, deleteThreads } = useMailActions();
   const [syncingOlder, setSyncingOlder] = useState(false);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -88,20 +90,14 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
 
   async function handleBulkArchive() {
     const ids = Array.from(checkedThreadIds);
-    clearChecked();
-    const results = await Promise.allSettled(ids.map((id) => api.archiveThread(id)));
-    const failed = results.filter((r) => r.status === "rejected").length;
-    if (failed > 0) addToast(`${failed} email(s) could not be archived — try syncing first`);
-    queryClient.invalidateQueries({ queryKey: ["threads"] });
+    try { await archiveThreads(ids); }
+    catch (error) { addToast(`Could not queue archive: ${String(error)}`); }
   }
 
   async function handleBulkDelete() {
     const ids = Array.from(checkedThreadIds);
-    clearChecked();
-    const results = await Promise.allSettled(ids.map((id) => api.deleteThread(id)));
-    const failed = results.filter((r) => r.status === "rejected").length;
-    if (failed > 0) addToast(`${failed} email(s) could not be deleted — try syncing first`);
-    queryClient.invalidateQueries({ queryKey: ["threads"] });
+    try { await deleteThreads(ids); }
+    catch (error) { addToast(`Could not queue delete: ${String(error)}`); }
   }
 
   function handleStar(thread: Thread) {

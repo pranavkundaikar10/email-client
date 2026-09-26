@@ -428,6 +428,7 @@ pub async fn fetch_message_body(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
     message_id: String,
+    force: Option<bool>,
 ) -> Result<crate::commands::db::MessageRow, String> {
     // Use i64 for body_fetched — SQLite stores booleans as INTEGER
     let row: Option<(i64, String)> = sqlx::query_as(
@@ -449,7 +450,7 @@ pub async fn fetch_message_body(
             .await
             .map_err(|e| e.to_string())?;
 
-    if body_fetched {
+    if body_fetched && !force.unwrap_or(false) {
         let messages = crate::commands::db::get_messages(pool, thread_id).await?;
         return messages
             .into_iter()
@@ -1024,9 +1025,35 @@ fn parse_date(raw: &str) -> String {
         .unwrap_or_else(|_| Utc::now().to_rfc3339())
 }
 
+fn html_visible_content_score(html: &str) -> usize {
+    // Email senders sometimes include an empty text/html placeholder before
+    // the real rich part. Score visible content rather than accepting the
+    // first HTML leaf in the MIME tree.
+    let without_non_visible = html
+        .split("<style")
+        .next()
+        .unwrap_or(html)
+        .split("<script")
+        .next()
+        .unwrap_or(html);
+    let visible: String = without_non_visible
+        .chars()
+        .scan(false, |inside_tag, c| {
+            match c {
+                '<' => *inside_tag = true,
+                '>' => *inside_tag = false,
+                _ => {}
+            }
+            Some(if *inside_tag || matches!(c, '<' | '>') { ' ' } else { c })
+        })
+        .filter(|c| !c.is_whitespace() && *c != '\u{00a0}')
+        .collect();
+    visible.len()
+}
+
 fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<String>, bool) {
-    let mut html: Option<String> = None;
-    let mut text: Option<String> = None;
+    let mut html_candidates: Vec<String> = Vec::new();
+    let mut text_candidates: Vec<String> = Vec::new();
 
     if mail.subparts.is_empty() {
         let ct = mail.ctype.mimetype.to_lowercase();
@@ -1042,21 +1069,33 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
             return (None, None, true);
         }
         let body = mail.get_body().unwrap_or_default();
-        if ct.contains("html") {
-            html = Some(body);
+        if ct == "text/html" {
+            if html_visible_content_score(&body) > 0 {
+                html_candidates.push(body);
+            }
         } else if ct == "text/plain" {
-            text = Some(body);
+            if !body.trim().is_empty() {
+                text_candidates.push(body);
+            }
         }
-        return (html, text, false);
+        return (
+            html_candidates.into_iter().max_by_key(|body| html_visible_content_score(body)),
+            text_candidates.into_iter().max_by_key(|body| body.trim().len()),
+            false,
+        );
     }
 
     let mut has_attachments = false;
     for part in &mail.subparts {
         let (h, t, attached) = extract_body_parts(part);
-        if html.is_none() { html = h; }
-        if text.is_none() { text = t; }
+        if let Some(html) = h { html_candidates.push(html); }
+        if let Some(text) = t { text_candidates.push(text); }
         has_attachments |= attached;
     }
 
-    (html, text, has_attachments)
+    (
+        html_candidates.into_iter().max_by_key(|body| html_visible_content_score(body)),
+        text_candidates.into_iter().max_by_key(|body| body.trim().len()),
+        has_attachments,
+    )
 }

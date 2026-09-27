@@ -610,8 +610,12 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
 
   if (!selectedThreadId) {
     return (
-      <div className="flex-1 flex items-center justify-center text-sm text-gray-300 select-none">
-        Select an email to read
+      <div className="flex flex-1 select-none flex-col items-center justify-center gap-1.5 text-center">
+        <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500">
+          <MailOpen size={20} strokeWidth={1.75} />
+        </div>
+        <p className="text-[clamp(1rem,1.5vw,1.5rem)] font-medium text-gray-700">Select an email to read</p>
+        <p className="text-[clamp(0.75rem,0.9vw,0.95rem)] text-gray-500">Press <kbd className="rounded border border-gray-300 bg-gray-100 px-1.5 py-0.5 font-mono text-[0.85em] font-medium text-gray-600">J</kbd> or click an email to open it</p>
       </div>
     );
   }

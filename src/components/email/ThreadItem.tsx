@@ -99,7 +99,7 @@ export default function ThreadItem({ thread, selected, checked, importance, onCl
               {severity.label}
             </span>
           )}
-          <span className="text-xs text-gray-400">{formatDate(thread.last_message_at)}</span>
+          <span className="text-xs text-gray-500">{formatDate(thread.last_message_at)}</span>
         </div>
       </div>
 
@@ -118,10 +118,6 @@ export default function ThreadItem({ thread, selected, checked, importance, onCl
           {thread.subject || "(no subject)"}
         </span>
       </div>
-
-      <p className="text-xs text-gray-400 truncate leading-relaxed">
-        {thread.snippet}
-      </p>
       </button>
 
       {/* Star — right */}

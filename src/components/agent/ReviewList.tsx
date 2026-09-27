@@ -6,6 +6,7 @@ import ThreadItem from "../email/ThreadItem";
 import BulkActionBar from "../email/BulkActionBar";
 import { useAppStore } from "../../store";
 import { useMailActions } from "../../hooks/useMailActions";
+import { useMailFlags } from "../../hooks/useMailFlags";
 import { useVisibleThreadList } from "../../hooks/useVisibleThreadList";
 
 export default function ReviewList() {
@@ -16,6 +17,7 @@ export default function ReviewList() {
   const clearChecked = useAppStore((s) => s.clearChecked);
   const addToast = useAppStore((s) => s.addToast);
   const { archiveThreads, deleteThreads } = useMailActions();
+  const { setStarred } = useMailFlags();
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [sort, setSort] = useState<"priority" | "newest" | "oldest">("priority");
   const { data: queue = [], isLoading } = useQuery({
@@ -83,7 +85,7 @@ export default function ReviewList() {
       importance={item.importance}
       onClick={() => setSelectedThread(item.thread_id)}
       onCheck={() => toggleThreadCheck(item.thread_id)}
-      onStar={() => {}}
+      onStar={() => { void setStarred(item.thread_id, !item.starred); }}
     /></div>);
   }
 

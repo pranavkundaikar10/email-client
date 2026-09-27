@@ -6,6 +6,7 @@ import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
+import { useMailFlags } from "../../hooks/useMailFlags";
 import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
 import JobCategoryBadge from "../ui/JobCategoryBadge";
 import { recommendationLabel, recommendationTone } from "../../lib/recommendations";
@@ -311,6 +312,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   const addToast = useAppStore((s) => s.addToast);
   const queryClient = useQueryClient();
   const { archiveThread: queueArchiveThread, deleteThread: queueDeleteThread } = useMailActions();
+  const { markRead, markUnread: queueMarkUnread, setStarred } = useMailFlags();
 
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["messages", selectedThreadId],
@@ -337,10 +339,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   });
 
   const { mutate: markUnread, isPending: markingUnread } = useMutation({
-    mutationFn: (threadId: string) => api.markThreadUnread(threadId),
+    mutationFn: (threadId: string) => queueMarkUnread(threadId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-      queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
       addToast("Marked unread locally");
     },
     onError: (err) => addToast(`Could not mark unread: ${String(err)}`),
@@ -415,32 +415,21 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       }
       if (key === "s") {
         const thread = useAppStore.getState().threads.find((t) => t.id === threadId);
-        if (thread) api.starThread(threadId, !thread.starred).then(() =>
-          queryClient.invalidateQueries({ queryKey: ["threads"] })
-        );
+        if (thread) void setStarred(threadId, !thread.starred);
         return;
       }
       if (key === "u") {
-        api.markThreadRead(threadId).then(() =>
-          queryClient.invalidateQueries({ queryKey: ["threads"] })
-        );
+        void markRead(threadId);
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, queryClient]);
+  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, markRead, setStarred]);
 
   useEffect(() => {
     if (!selectedThreadId) return;
-    // Optimistically flip unread→false in the cache immediately so the
-    // font-weight change happens in sync with selection, not after the API call.
-    queryClient.setQueryData<import("../../lib/api").Thread[]>(["threads"], (old) =>
-      old?.map((t) => t.id === selectedThreadId ? { ...t, unread: false } : t)
-    );
-    api.markThreadRead(selectedThreadId).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    });
-  }, [selectedThreadId]);
+    void markRead(selectedThreadId);
+  }, [selectedThreadId, markRead]);
 
   if (!selectedThreadId) {
     return (

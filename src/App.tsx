@@ -23,7 +23,9 @@ type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "re
 const ACCOUNT_KEY = "connected_email";
 
 function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) {
-  const [activeView, setActiveView] = useState<View>("inbox");
+  const [activeView, setActiveView] = useState<View>("review");
+  const [initialSyncComplete, setInitialSyncComplete] = useState(false);
+  const startupViewResolved = useRef(false);
   const [, setSyncing] = useState(false);
   const syncedFolders = useRef(new Set<string>());
   const backgroundAnalysisRunning = useRef(false);
@@ -66,6 +68,24 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     refetchInterval: 60_000,
   });
 
+  useEffect(() => {
+    if (startupViewResolved.current || !initialSyncComplete) return;
+    let cancelled = false;
+    // Read a fresh startup snapshot rather than relying on whichever list
+    // cache happened to render first during sync.
+    Promise.all([api.getReviewQueue(50, "priority"), api.getAutoAnalysisPendingCount()])
+      .then(([queue, pendingCount]) => {
+        if (cancelled || startupViewResolved.current) return;
+        startupViewResolved.current = true;
+        if (queue.length === 0 && pendingCount === 0) setActiveView("inbox");
+      })
+      .catch(() => {
+        // Keep Review as the safe default if the local status lookup fails.
+        if (!cancelled) startupViewResolved.current = true;
+      });
+    return () => { cancelled = true; };
+  }, [initialSyncComplete]);
+
   const splitDefs = useMemo(
     () => rawSplits.map((s) => ({ id: s.id, label: s.name })),
     [rawSplits]
@@ -90,15 +110,23 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   }, [showTabs, activeSplitId, splitDefs]);
 
   function switchTab(id: string) {
+    startupViewResolved.current = true;
     setActiveSplitId(id);
     setSelectedThread(null);
   }
 
+  function changeView(view: View) {
+    startupViewResolved.current = true;
+    setActiveView(view);
+  }
+
   useKeyboardNav({
-    onViewChange: setActiveView,
+    onViewChange: changeView,
     onSearchFocus: () => { searchInputRef.current?.focus(); },
     splits: splitDefs,
-    onSplitChange: (id) => { setActiveView("inbox"); setActiveSplitId(id); },
+    onSplitChange: (id) => { startupViewResolved.current = true; setActiveView("inbox"); setActiveSplitId(id); },
+    activeSplitId: effectiveSplitId,
+    splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen,
   });
 
   // C — compose
@@ -150,6 +178,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         addToast(`Sync failed: ${String(err)}`);
       } finally {
         setSyncing(false);
+        setInitialSyncComplete(true);
       }
     }
     sync();
@@ -174,7 +203,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     <div className="flex h-screen w-screen overflow-hidden bg-white">
       <Sidebar
         activeView={activeView}
-        onViewChange={setActiveView}
+        onViewChange={changeView}
         email={email}
         onLogout={onLogout}
         onSplits={() => setSplitsOpen(true)}
@@ -254,10 +283,10 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       {/* Command palette */}
       {commandPaletteOpen && (
         <CommandPalette
-          onViewChange={setActiveView}
+          onViewChange={changeView}
           onClose={() => setCommandPaletteOpen(false)}
           splits={splitDefs}
-          onSplitChange={(id) => { setActiveView("inbox"); setActiveSplitId(id); }}
+          onSplitChange={(id) => { startupViewResolved.current = true; setActiveView("inbox"); setActiveSplitId(id); }}
           onSplitsSettings={() => setSplitsOpen(true)}
         />
       )}

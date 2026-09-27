@@ -11,9 +11,18 @@ interface Options {
   onSearchFocus: () => void;
   splits?: { id: string; label: string }[];
   onSplitChange?: (id: string) => void;
+  activeSplitId?: string | null;
+  splitNavigationEnabled?: boolean;
 }
 
-export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitChange }: Options) {
+export function useKeyboardNav({
+  onViewChange,
+  onSearchFocus,
+  splits,
+  onSplitChange,
+  activeSplitId,
+  splitNavigationEnabled = false,
+}: Options) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
@@ -92,6 +101,27 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
     if (!selectedThreadId) return;
     void markRead(selectedThreadId);
   }, { enableOnFormTags: false });
+
+  // Match Superhuman's Split Inbox navigation: Tab moves right through Split
+  // Inboxes and Shift+Tab moves left. Scoped to the email workspace so text
+  // fields and open dialogs retain normal native focus traversal.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Tab" || !splitNavigationEnabled || !splits?.length || !onSplitChange) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
+
+      e.preventDefault();
+      const currentIndex = splits.findIndex((split) => split.id === activeSplitId);
+      const start = currentIndex === -1 ? (e.shiftKey ? 0 : -1) : currentIndex;
+      const nextIndex = (start + (e.shiftKey ? -1 : 1) + splits.length) % splits.length;
+      onViewChange("inbox");
+      onSplitChange(splits[nextIndex].id);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeSplitId, onSplitChange, onViewChange, splitNavigationEnabled, splits]);
 
   // Escape — deselect
   useHotkeys("escape", (e) => {

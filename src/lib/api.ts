@@ -57,6 +57,8 @@ export type AnalysisCategory =
   | "newsletter"
   | "other";
 
+export type RecommendedAction = "keep" | "follow_up" | "archive" | "delete" | "review";
+
 export interface ThreadAnalysis {
   thread_id: string;
   is_actionable: boolean;
@@ -67,6 +69,7 @@ export interface ThreadAnalysis {
   summary: string;
   action_items: string; // JSON-encoded string[]
   deadline: string | null;
+  recommended_action: RecommendedAction;
   model: string;
   analyzed_at: string;
 }
@@ -109,6 +112,7 @@ export interface ReviewItem extends Thread {
   action_items: string;
   deadline: string | null;
   is_actionable: boolean;
+  recommended_action: RecommendedAction;
 }
 
 export const api = {

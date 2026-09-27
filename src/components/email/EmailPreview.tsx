@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
 import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
 import JobCategoryBadge from "../ui/JobCategoryBadge";
+import { recommendationLabel, recommendationTone } from "../../lib/recommendations";
 
 // Renders HTML email in an isolated iframe so its <style> tags cannot
 // leak out and shift the host page layout.
@@ -302,13 +303,6 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
   );
 }
 
-function reviewRecommendation(category: string, actionable: boolean, importance: number) {
-  if (["assessment", "interview", "offer", "deadline"].includes(category)) return "Keep in inbox";
-  if (actionable || importance >= 3) return "Needs your review";
-  if (category === "rejection" || category === "newsletter" || importance <= 2) return "Archive — low risk";
-  return "Needs your review";
-}
-
 export default function EmailPreview({ email, reviewMode = false }: { email: string; reviewMode?: boolean }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
@@ -354,9 +348,15 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
 
   const { mutate: analyzeThread, isPending: analyzing } = useMutation({
     mutationFn: (threadId: string) => api.analyzeThread(threadId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["thread_analysis", selectedThreadId] });
-      queryClient.invalidateQueries({ queryKey: ["digest"] });
+    onSuccess: async () => {
+      // Keep the visible Analyze state until every surface backed by this
+      // result has refreshed. In review mode the recommendation comes from
+      // the queue item, not the thread-analysis banner.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["thread_analysis", selectedThreadId] }),
+        queryClient.invalidateQueries({ queryKey: ["digest"] }),
+        queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+      ]);
       addToast("Email analyzed");
     },
     onError: (err) => addToast(`Analysis failed: ${String(err)}`),
@@ -508,8 +508,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Review decision</p>
-              <p className="mt-1.5 text-sm font-medium text-gray-700">
-                {reviewRecommendation(reviewItem.category, reviewItem.is_actionable, reviewItem.importance)}
+              <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
+                {recommendationLabel(reviewItem.recommended_action)}
               </p>
             </div>
             <div className="flex items-center gap-2">

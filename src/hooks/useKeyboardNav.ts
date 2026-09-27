@@ -1,9 +1,8 @@
 import { useEffect } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { useQueryClient } from "@tanstack/react-query";
 import { useAppStore } from "../store";
-import { api } from "../lib/api";
 import { useMailActions } from "./useMailActions";
+import { useMailFlags } from "./useMailFlags";
 
 type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts";
 
@@ -20,8 +19,8 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
-  const queryClient = useQueryClient();
   const { archiveThreads, deleteThreads } = useMailActions();
+  const { markRead, setStarred } = useMailFlags();
 
   // J — next thread
   useHotkeys("j", (e) => {
@@ -84,18 +83,14 @@ export function useKeyboardNav({ onViewChange, onSearchFocus, splits, onSplitCha
     if (!selectedThreadId) return;
     const thread = useAppStore.getState().threads.find((t) => t.id === selectedThreadId);
     if (!thread) return;
-    api.starThread(selectedThreadId, !thread.starred).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    });
+    void setStarred(selectedThreadId, !thread.starred);
   }, { enableOnFormTags: false });
 
   // U — mark read
   useHotkeys("u", (e) => {
     e.preventDefault();
     if (!selectedThreadId) return;
-    api.markThreadRead(selectedThreadId).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    });
+    void markRead(selectedThreadId);
   }, { enableOnFormTags: false });
 
   // Escape — deselect

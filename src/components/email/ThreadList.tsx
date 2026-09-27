@@ -4,6 +4,7 @@ import { api, type Thread } from "../../lib/api";
 import ThreadItem from "./ThreadItem";
 import { useAppStore } from "../../store";
 import { useMailActions } from "../../hooks/useMailActions";
+import { useMailFlags } from "../../hooks/useMailFlags";
 import { useVisibleThreadList } from "../../hooks/useVisibleThreadList";
 import BulkActionBar from "./BulkActionBar";
 
@@ -26,6 +27,7 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
   const addToast = useAppStore((s) => s.addToast);
   const queryClient = useQueryClient();
   const { archiveThreads, deleteThreads } = useMailActions();
+  const { setStarred } = useMailFlags();
   const [syncingOlder, setSyncingOlder] = useState(false);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -100,23 +102,7 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
   }
 
   function handleStar(thread: Thread) {
-    const newStarred = !thread.starred;
-    // Optimistic update across all cached thread pages
-    queryClient.setQueriesData<{ pages: Thread[][]; pageParams: number[] }>(
-      { queryKey: ["threads"] },
-      (old) =>
-        old
-          ? {
-              ...old,
-              pages: old.pages.map((page) =>
-                page.map((t) => (t.id === thread.id ? { ...t, starred: newStarred } : t))
-              ),
-            }
-          : old
-    );
-    api.starThread(thread.id, newStarred).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-    });
+    void setStarred(thread.id, !thread.starred);
   }
 
   const renderThread = (thread: Thread) => (

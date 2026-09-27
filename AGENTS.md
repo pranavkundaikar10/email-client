@@ -30,6 +30,8 @@ In particular:
 - Automatic background AI triage must call Ollama with thinking disabled and a
   bounded final response. Manual analysis retains the model default so users
   can choose a deeper review when needed.
+- User triage preferences are local-only context appended to the locked AI
+  contract; they must never replace its JSON schema or safety safeguards.
 
 ## Before handoff
 

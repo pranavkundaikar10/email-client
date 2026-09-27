@@ -89,7 +89,7 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
       </button>
       <button
         onClick={onSplits}
-        title="Split Inbox"
+        title="Settings"
         className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
       >
         <SlidersHorizontal size={15} />

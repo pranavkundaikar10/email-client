@@ -124,6 +124,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         await api.analyzeThread(candidate.thread_id, undefined, undefined, false);
         queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
         queryClient.invalidateQueries({ queryKey: ["digest"] });
+        // The pending indicator and Review list must transition together once
+        // the persisted analysis makes this thread eligible for review.
+        queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       } catch (err) {
         // Background triage is opportunistic. Manual Analyze remains available
         // and avoids interrupting the user with repeated transient errors.
@@ -142,7 +145,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         await api.syncInbox(email);
         queryClient.invalidateQueries({ queryKey: ["threads"] });
         queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
         await processOneRecentEmail();
+        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
       } catch (err) {
         addToast(`Sync failed: ${String(err)}`);
       } finally {

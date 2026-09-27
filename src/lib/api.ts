@@ -199,8 +199,17 @@ export const api = {
   setAiModel: (model: string) =>
     invoke<void>("set_ai_model", { model }),
 
+  getTriagePreferences: () =>
+    invoke<string>("get_triage_preferences"),
+
+  setTriagePreferences: (preferences: string) =>
+    invoke<void>("set_triage_preferences", { preferences }),
+
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),
+
+  getAutoAnalysisPendingCount: () =>
+    invoke<number>("get_auto_analysis_pending_count"),
 
   getReviewQueue: (limit = 50, sort: "priority" | "newest" | "oldest" = "priority") =>
     invoke<ReviewItem[]>("get_review_queue", { limit, sort }),

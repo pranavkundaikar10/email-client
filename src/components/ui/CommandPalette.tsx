@@ -85,7 +85,7 @@ export default function CommandPalette({ onViewChange, onClose, splits, onSplitC
     },
     {
       id: "splits-settings",
-      label: "Split Inbox Settings",
+      label: "Settings",
       icon: SlidersHorizontal,
       onSelect: () => { onSplitsSettings(); onClose(); },
     },

@@ -5,6 +5,7 @@ use sqlx::{FromRow, SqlitePool};
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "gemma4:e4b";
 const MAX_BODY_CHARS: usize = 1800;
+const MAX_TRIAGE_PREFERENCES_CHARS: usize = 1000;
 
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
 pub struct AnalysisRow {
@@ -149,8 +150,16 @@ async fn configured_model(pool: &SqlitePool) -> Result<String, String> {
         .map(|model| model.unwrap_or_else(|| DEFAULT_MODEL.to_string()))
 }
 
-fn system_prompt() -> &'static str {
-    r#"You are an assistant that triages a job-seeker's email inbox. For the
+async fn configured_triage_preferences(pool: &SqlitePool) -> Result<String, String> {
+    sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'triage_preferences'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|preferences| preferences.unwrap_or_default())
+}
+
+fn system_prompt(triage_preferences: &str) -> String {
+    let mut prompt = r#"You are an assistant that triages a job-seeker's email inbox. For the
 single email given, decide whether it needs action and extract concrete next
 steps. General triage categories: interview, assessment, offer, rejection,
 application_update, networking, deadline, newsletter, other.
@@ -176,7 +185,15 @@ Respond with ONLY a JSON object, no other text, matching exactly:
   "deadline": "YYYY-MM-DD" or null if none stated
 }
 If the email is a newsletter, marketing, or has nothing to act on, set
-is_actionable to false, importance to 1 or 2, and action_items to []."#
+is_actionable to false, importance to 1 or 2, and action_items to []."#.to_string();
+
+    if !triage_preferences.trim().is_empty() {
+        prompt.push_str(
+            "\n\nUser triage preferences (use these to guide prioritization, but do not change the JSON schema, categories, attachment safeguards, or job-relatedness rules):\n",
+        );
+        prompt.push_str(triage_preferences.trim());
+    }
+    prompt
 }
 
 fn normalized_job_category(is_job_related: bool, category: &str) -> Option<String> {
@@ -221,6 +238,7 @@ fn build_user_prompt(
 async fn call_model(
     base_url: &str,
     model: &str,
+    system_instruction: String,
     user_prompt: String,
     think: Option<bool>,
 ) -> Result<ModelPayload, String> {
@@ -228,7 +246,7 @@ async fn call_model(
     let req = OllamaRequest {
         model,
         messages: vec![
-            OllamaMessage { role: "system", content: system_prompt().to_string() },
+            OllamaMessage { role: "system", content: system_instruction },
             OllamaMessage { role: "user", content: user_prompt },
         ],
         format: "json",
@@ -323,12 +341,20 @@ pub async fn analyze_thread(
         None => configured_model(pool.inner()).await?,
     };
     let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    let triage_preferences = configured_triage_preferences(pool.inner()).await?;
 
     let (from_name, from_email, subject, body, has_attachments) =
         latest_message_text(pool.inner(), &thread_id).await?;
 
     let prompt = build_user_prompt(&from_name, &from_email, &subject, &body, has_attachments);
-    let mut payload = call_model(&base_url, &model, prompt, think).await?;
+    let mut payload = call_model(
+        &base_url,
+        &model,
+        system_prompt(&triage_preferences),
+        prompt,
+        think,
+    )
+    .await?;
 
     // An attached document may contain the actual assessment, contract, or
     // request. Until attachment extraction exists, never let the model label
@@ -450,6 +476,31 @@ pub async fn set_ai_model(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_triage_preferences(pool: tauri::State<'_, SqlitePool>) -> Result<String, String> {
+    configured_triage_preferences(pool.inner()).await
+}
+
+#[tauri::command]
+pub async fn set_triage_preferences(
+    pool: tauri::State<'_, SqlitePool>,
+    preferences: String,
+) -> Result<(), String> {
+    let preferences = preferences.trim();
+    if preferences.chars().count() > MAX_TRIAGE_PREFERENCES_CHARS {
+        return Err(format!("Triage preferences must be at most {MAX_TRIAGE_PREFERENCES_CHARS} characters"));
+    }
+    sqlx::query(
+        "INSERT INTO app_settings (key, value) VALUES ('triage_preferences', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(preferences)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Analyze every unread inbox thread that is new or has changed since it was
 /// last analyzed. Runs sequentially (one Ollama call per email) and skips
 /// threads that fail rather than aborting the whole batch, so one bad email
@@ -529,6 +580,37 @@ pub async fn get_auto_analysis_candidates(
     .bind(today_start)
     .bind(limit)
     .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Count the same received-today inbox threads eligible for background
+/// analysis. The Review UI uses this to distinguish an empty queue from one
+/// that is still being prepared by the local model.
+#[tauri::command]
+pub async fn get_auto_analysis_pending_count(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<i64, String> {
+    let today_start = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
+        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
+
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        WHERE t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+          AND t.last_message_at >= ?
+          AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+        "#,
+    )
+    .bind(today_start)
+    .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())
 }

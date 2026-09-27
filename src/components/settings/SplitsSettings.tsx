@@ -38,6 +38,7 @@ export default function SplitsSettings({ onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [triagePreferences, setTriagePreferences] = useState<string | null>(null);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -58,6 +59,14 @@ export default function SplitsSettings({ onClose }: Props) {
   });
 
   const {
+    data: savedTriagePreferences = "",
+    isSuccess: triagePreferencesLoaded,
+  } = useQuery({
+    queryKey: ["triage_preferences"],
+    queryFn: api.getTriagePreferences,
+  });
+
+  const {
     data: ollamaModels = [],
     error: ollamaError,
     isFetching: fetchingModels,
@@ -70,6 +79,15 @@ export default function SplitsSettings({ onClose }: Props) {
   useEffect(() => {
     if (configuredModel && selectedModel === null) setSelectedModel(configuredModel);
   }, [configuredModel, selectedModel]);
+
+  useEffect(() => {
+    // Do not treat React Query's initial fallback value as the stored value.
+    // Otherwise the textarea is set to "" before SQLite responds and never
+    // picks up a non-empty saved preference.
+    if (triagePreferencesLoaded && triagePreferences === null) {
+      setTriagePreferences(savedTriagePreferences);
+    }
+  }, [savedTriagePreferences, triagePreferences, triagePreferencesLoaded]);
 
   const [splits, setSplits] = useState<LocalSplit[] | null>(null);
   const effective = splits ?? rawSplits.map(parseSplit);
@@ -159,6 +177,10 @@ export default function SplitsSettings({ onClose }: Props) {
       if (selectedModel && selectedModel !== configuredModel) {
         await api.setAiModel(selectedModel);
       }
+      const normalizedPreferences = (triagePreferences ?? savedTriagePreferences).trim();
+      if (normalizedPreferences !== savedTriagePreferences) {
+        await api.setTriagePreferences(normalizedPreferences);
+      }
       const existing = new Set(rawSplits.map((s) => s.id));
       const kept = new Set(effective.map((s) => s.id));
 
@@ -186,6 +208,7 @@ export default function SplitsSettings({ onClose }: Props) {
       queryClient.invalidateQueries({ queryKey: ["splits"] });
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["ai_model"] });
+      queryClient.invalidateQueries({ queryKey: ["triage_preferences"] });
       setSplits(null);
       onClose();
     } catch (e) {
@@ -248,6 +271,38 @@ export default function SplitsSettings({ onClose }: Props) {
                 )}
               </select>
             )}
+          </section>
+
+          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5">
+                <Sparkles size={14} className="text-indigo-500" />
+                <h3 className="text-xs font-semibold text-gray-800">AI triage preferences</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTriagePreferences("")}
+                disabled={!(triagePreferences ?? savedTriagePreferences)}
+                className="text-[11px] font-medium text-gray-500 hover:text-gray-800 disabled:opacity-40"
+              >
+                Reset
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Tell the local assistant what matters to you. Applied only to new or manually re-analyzed emails.
+            </p>
+            <textarea
+              value={triagePreferences ?? savedTriagePreferences}
+              onChange={(event) => setTriagePreferences(event.target.value.slice(0, 1000))}
+              maxLength={1000}
+              rows={5}
+              placeholder="Example: I’m targeting backend and platform engineering roles. Prioritize recruiter scheduling, assessments, interviews, visa questions, and deadlines."
+              className="mt-3 w-full resize-y rounded-md border border-indigo-100 bg-white px-2.5 py-2 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300 focus:border-indigo-400"
+            />
+            <div className="mt-1.5 flex items-start justify-between gap-3 text-[10px] text-gray-400">
+              <span>Core JSON rules and attachment protection always remain enabled.</span>
+              <span className="flex-shrink-0">{(triagePreferences ?? savedTriagePreferences).length}/1000</span>
+            </div>
           </section>
 
           <p className="pt-1 text-xs text-gray-400">

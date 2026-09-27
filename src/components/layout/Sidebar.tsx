@@ -1,7 +1,7 @@
-import { Inbox, Star, Archive, Search, LogOut, SlidersHorizontal, Send, FileEdit, SquarePen, Sparkles, ListChecks } from "lucide-react";
+import { Inbox, Star, Archive, Search, LogOut, SlidersHorizontal, Send, FileEdit, SquarePen, Sparkles, ListChecks, CalendarClock } from "lucide-react";
 import { cn } from "../../lib/utils";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review" | "follow_ups";
 
 interface Props {
   activeView: View;
@@ -12,6 +12,7 @@ interface Props {
   onCompose: () => void;
   onDigest: () => void;
   inboxUnread: number;
+  followUpDueCount: number;
 }
 
 const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string }[] = [
@@ -23,7 +24,7 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
   { id: "search",  icon: Search,   label: "Search",   shortcut: "/"   },
 ];
 
-export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, inboxUnread }: Props) {
+export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, inboxUnread, followUpDueCount }: Props) {
   return (
     <aside className="w-14 flex flex-col items-center py-4 gap-1 bg-gray-950 border-r border-gray-800 flex-shrink-0">
       {/* Avatar */}
@@ -45,6 +46,22 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
         )}
       >
         <ListChecks size={17} />
+      </button>
+
+      <button
+        onClick={() => onViewChange("follow_ups")}
+        title="Follow-ups (G F)"
+        className={cn(
+          "relative mb-1 flex h-9 w-9 items-center justify-center rounded-lg transition-colors",
+          activeView === "follow_ups"
+            ? "bg-violet-500 text-white"
+            : "text-violet-300 hover:bg-violet-500/15 hover:text-violet-100"
+        )}
+      >
+        <CalendarClock size={17} />
+        {followUpDueCount > 0 && <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-500 px-0.5 text-[9px] font-bold leading-none text-white">
+          {followUpDueCount > 99 ? "99+" : followUpDueCount}
+        </span>}
       </button>
 
       {/* Compose */}

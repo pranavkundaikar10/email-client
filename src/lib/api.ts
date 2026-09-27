@@ -115,6 +115,11 @@ export interface ReviewItem extends Thread {
   recommended_action: RecommendedAction;
 }
 
+export interface FollowUpItem extends Thread {
+  thread_id: string;
+  due_at: string;
+}
+
 export const api = {
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
@@ -231,6 +236,15 @@ export const api = {
 
   recordReviewDecision: (threadId: string, decision: "keep" | "follow_up" | "archived") =>
     invoke<void>("record_review_decision", { threadId, decision }),
+
+  scheduleFollowUp: (threadId: string, dueAt: string) =>
+    invoke<void>("schedule_follow_up", { threadId, dueAt }),
+
+  completeFollowUp: (threadId: string) =>
+    invoke<void>("complete_follow_up", { threadId }),
+
+  getFollowUps: () =>
+    invoke<FollowUpItem[]>("get_follow_ups"),
 
   getDigest: (limit = 50) =>
     invoke<DigestItem[]>("get_digest", { limit }),

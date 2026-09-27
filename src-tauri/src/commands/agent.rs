@@ -88,6 +88,28 @@ pub struct ReviewItem {
     pub recommended_action: String,
 }
 
+/// A locally scheduled follow-up attached to an inbox thread. It never moves
+/// or modifies the corresponding Gmail message by itself.
+#[derive(Debug, Serialize, FromRow)]
+pub struct FollowUpItem {
+    pub thread_id: String,
+    pub due_at: String,
+    pub id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub snippet: String,
+    pub unread: bool,
+    pub starred: bool,
+    pub archived: bool,
+    pub last_message_at: String,
+    pub label_ids: String,
+    pub folder: String,
+    pub from_name: String,
+    pub from_email: String,
+    pub to_emails: String,
+    pub category: String,
+}
+
 /// What we ask the model to return. `format: "json"` on the Ollama request
 /// constrains output to valid JSON; this struct is what we parse it into.
 #[derive(Debug, Deserialize)]
@@ -792,6 +814,81 @@ pub async fn record_review_decision(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn schedule_follow_up(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+    due_at: String,
+) -> Result<(), String> {
+    let due_at = chrono::DateTime::parse_from_rfc3339(&due_at)
+        .map_err(|_| "Follow-up time must include a valid date and time".to_string())?
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO follow_ups (thread_id, due_at, status, created_at, updated_at)
+        VALUES (?, ?, 'active', ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+            due_at = excluded.due_at,
+            status = 'active',
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(thread_id)
+    .bind(due_at)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_follow_up(
+    pool: tauri::State<'_, SqlitePool>,
+    thread_id: String,
+) -> Result<(), String> {
+    sqlx::query("UPDATE follow_ups SET status = 'completed', updated_at = ? WHERE thread_id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(thread_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_follow_ups(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<Vec<FollowUpItem>, String> {
+    sqlx::query_as::<_, FollowUpItem>(
+        r#"
+        SELECT f.thread_id, f.due_at,
+               t.id, t.account_id, t.subject, t.snippet, t.unread, t.starred,
+               t.archived, t.last_message_at, t.label_ids, t.folder,
+               COALESCE(m.from_name, '') AS from_name,
+               COALESCE(m.from_email, '') AS from_email,
+               COALESCE(m.to_emails, '[]') AS to_emails,
+               t.category
+        FROM follow_ups f
+        JOIN threads t ON t.id = f.thread_id
+        LEFT JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        WHERE f.status = 'active' AND t.archived = 0
+          AND NOT EXISTS (
+              SELECT 1 FROM mail_operations o
+              WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress')
+          )
+        ORDER BY f.due_at ASC
+        "#,
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Digest for the panel: analyzed, actionable-first, most important first,

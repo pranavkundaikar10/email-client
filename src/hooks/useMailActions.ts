@@ -38,6 +38,7 @@ export function useMailActions() {
     await Promise.all([
       queryClient.refetchQueries({ queryKey: ["threads"] }),
       queryClient.refetchQueries({ queryKey: ["review_queue"] }),
+      queryClient.refetchQueries({ queryKey: ["follow_ups"] }),
       queryClient.refetchQueries({ queryKey: ["search"] }),
       queryClient.refetchQueries({ queryKey: ["digest"] }),
     ]);
@@ -53,7 +54,7 @@ export function useMailActions() {
 
     // All views have distinct query keys and shapes, so update them together
     // rather than making each feature reinvent an optimistic delete.
-    for (const queryKey of [["threads"], ["review_queue"], ["search"], ["digest"]]) {
+    for (const queryKey of [["threads"], ["review_queue"], ["follow_ups"], ["search"], ["digest"]]) {
       queryClient.setQueriesData({ queryKey }, (old) => withoutThreads(old, idSet));
     }
 
@@ -81,6 +82,7 @@ export function useMailActions() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["threads"] }),
         queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+        queryClient.invalidateQueries({ queryKey: ["follow_ups"] }),
         queryClient.invalidateQueries({ queryKey: ["search"] }),
         queryClient.invalidateQueries({ queryKey: ["digest"] }),
       ]);
@@ -91,6 +93,7 @@ export function useMailActions() {
     // not wait for Gmail; the pending-operation filter keeps the item hidden.
     void queryClient.invalidateQueries({ queryKey: ["threads"] });
     void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+    void queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
     void queryClient.invalidateQueries({ queryKey: ["search"] });
     void queryClient.invalidateQueries({ queryKey: ["digest"] });
 

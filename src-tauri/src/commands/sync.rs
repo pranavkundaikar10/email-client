@@ -894,6 +894,14 @@ async fn enqueue_mail_operation(
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+    // An archived or trashed email no longer needs a local follow-up. This is
+    // local bookkeeping only; Gmail delivery remains owned by the outbox.
+    sqlx::query("UPDATE follow_ups SET status = 'completed', updated_at = ? WHERE thread_id = ?")
+        .bind(&now)
+        .bind(thread_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -9,16 +9,18 @@ import ThreadList from "./components/email/ThreadList";
 import EmailPreview from "./components/email/EmailPreview";
 import ComposeModal from "./components/email/ComposeModal";
 import CommandPalette from "./components/ui/CommandPalette";
+import KeyboardShortcutsDialog from "./components/ui/KeyboardShortcutsDialog";
 import SplitsSettings from "./components/settings/SplitsSettings";
 import DigestPanel from "./components/agent/DigestPanel";
 import ReviewList from "./components/agent/ReviewList";
+import FollowUpList from "./components/agent/FollowUpList";
 import { ToastContainer } from "./components/ui/Toast";
 import { useKeyboardNav } from "./hooks/useKeyboardNav";
 import { useAppStore } from "./store";
 import { api } from "./lib/api";
 import { listen } from "@tauri-apps/api/event";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review" | "follow_ups";
 
 const ACCOUNT_KEY = "connected_email";
 
@@ -33,6 +35,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [composeOpen, setComposeOpen] = useState(false);
   const [splitsOpen, setSplitsOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -67,6 +70,16 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryFn: api.getUnreadCounts,
     refetchInterval: 60_000,
   });
+  const { data: followUps = [] } = useQuery({
+    queryKey: ["follow_ups"],
+    queryFn: api.getFollowUps,
+    refetchInterval: 60_000,
+  });
+  const followUpDueCount = useMemo(() => {
+    const endToday = new Date();
+    endToday.setHours(23, 59, 59, 999);
+    return followUps.filter((item) => new Date(item.due_at) <= endToday).length;
+  }, [followUps]);
 
   useEffect(() => {
     if (startupViewResolved.current || !initialSyncComplete) return;
@@ -126,8 +139,20 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     splits: splitDefs,
     onSplitChange: (id) => { startupViewResolved.current = true; setActiveView("inbox"); setActiveSplitId(id); },
     activeSplitId: effectiveSplitId,
-    splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen,
+    splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen && !shortcutsOpen,
   });
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "?" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
+      event.preventDefault();
+      setShortcutsOpen(true);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // C — compose
   useHotkeys("c", (e) => {
@@ -210,6 +235,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         onCompose={() => setComposeOpen(true)}
         onDigest={() => setDigestOpen(true)}
         inboxUnread={Object.values(unreadCounts).reduce((a, b) => a + b, 0)}
+        followUpDueCount={followUpDueCount}
       />
 
       {/* Right content: tabs on top, then thread list + email preview below */}
@@ -255,7 +281,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
               inputRef={searchInputRef}
             />
 
-            {activeView === "review" ? <ReviewList /> : <ThreadList
+            {activeView === "review" ? <ReviewList /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
@@ -264,7 +290,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           </div>
 
           {/* Email preview */}
-          <EmailPreview email={email} reviewMode={activeView === "review"} />
+          <EmailPreview email={email} reviewMode={activeView === "review"} followUpMode={activeView === "follow_ups"} />
 
         </div>{/* end thread list + email preview row */}
       </div>{/* end right content column */}
@@ -290,6 +316,8 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           onSplitsSettings={() => setSplitsOpen(true)}
         />
       )}
+
+      {shortcutsOpen && <KeyboardShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
 
       <ToastContainer />
     </div>

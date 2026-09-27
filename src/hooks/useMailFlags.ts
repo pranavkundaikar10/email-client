@@ -34,7 +34,7 @@ export function useMailFlags() {
   const queryClient = useQueryClient();
 
   const patchEverywhere = useCallback((threadId: string, patch: ThreadPatch) => {
-    for (const queryKey of [["threads"], ["review_queue"], ["search"]]) {
+    for (const queryKey of [["threads"], ["review_queue"], ["follow_ups"], ["search"]]) {
       queryClient.setQueriesData({ queryKey }, (old) => patchThreadData(old, threadId, patch));
     }
     const state = useAppStore.getState();
@@ -44,6 +44,7 @@ export function useMailFlags() {
   const refresh = useCallback(() => Promise.all([
     queryClient.invalidateQueries({ queryKey: ["threads"] }),
     queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+    queryClient.invalidateQueries({ queryKey: ["follow_ups"] }),
     queryClient.invalidateQueries({ queryKey: ["search"] }),
     queryClient.invalidateQueries({ queryKey: ["unread_counts"] }),
   ]), [queryClient]);

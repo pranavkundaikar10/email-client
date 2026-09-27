@@ -1,7 +1,70 @@
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
 use std::fs;
+use std::path::Path;
 use tauri::{AppHandle, Manager};
 use serde::{Deserialize, Serialize};
+
+const LEGACY_APP_IDENTIFIER: &str = "com.pranavkundaikar.tmpemail-client-scaffold";
+
+/// Copies data created before the app received its production identifier.
+///
+/// App data is keyed by the Tauri identifier, so a renamed app otherwise looks
+/// like a clean installation. This is deliberately copy-only: the original
+/// directory remains an intact fallback if anything goes wrong.
+pub fn migrate_legacy_app_data(app: &AppHandle) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let parent = data_dir
+        .parent()
+        .ok_or_else(|| "Could not determine the application data directory".to_string())?;
+    let legacy_dir = parent.join(LEGACY_APP_IDENTIFIER);
+
+    if !legacy_dir.is_dir() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+
+    // Only fill missing files. This makes the migration safe for people who
+    // already set up the renamed app, and lets a partially interrupted copy
+    // finish on the next launch without overwriting newer data.
+    copy_if_missing(&legacy_dir.join("credentials.json"), &data_dir.join("credentials.json"))?;
+
+    let legacy_db = legacy_dir.join("mail.db");
+    let target_db = data_dir.join("mail.db");
+    if !target_db.exists() && legacy_db.exists() {
+        copy_file_atomically(&legacy_db, &target_db)?;
+        // SQLite may have recent writes in WAL mode. Copy its companion files
+        // before opening the migrated database so SQLite can recover them.
+        copy_if_missing(&legacy_dir.join("mail.db-wal"), &data_dir.join("mail.db-wal"))?;
+        copy_if_missing(&legacy_dir.join("mail.db-shm"), &data_dir.join("mail.db-shm"))?;
+    }
+
+    Ok(())
+}
+
+fn copy_if_missing(source: &Path, destination: &Path) -> Result<(), String> {
+    if source.exists() && !destination.exists() {
+        copy_file_atomically(source, destination)?;
+    }
+    Ok(())
+}
+
+fn copy_file_atomically(source: &Path, destination: &Path) -> Result<(), String> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Could not determine migration file name".to_string())?;
+    let temporary = destination.with_file_name(format!(".{file_name}.migrating"));
+
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|e| e.to_string())?;
+    }
+    fs::copy(source, &temporary).map_err(|e| e.to_string())?;
+    fs::rename(&temporary, destination).map_err(|e| e.to_string())
+}
 
 pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
     let data_dir = app

@@ -333,9 +333,34 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 }
 
 export default function App() {
-  const [email, setEmail] = useState<string | null>(
-    () => localStorage.getItem(ACCOUNT_KEY)
-  );
+  const [email, setEmail] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    const savedEmail = localStorage.getItem(ACCOUNT_KEY);
+    if (savedEmail) {
+      setEmail(savedEmail);
+      return;
+    }
+
+    let cancelled = false;
+    api.getAccounts()
+      .then((accounts) => {
+        if (cancelled) return;
+        if (accounts.length === 0) {
+          setEmail(null);
+          return;
+        }
+        // LocalStorage belongs to the old WebView profile and is not carried
+        // across an identifier change. The migrated account is authoritative.
+        localStorage.setItem(ACCOUNT_KEY, accounts[0]);
+        setEmail(accounts[0]);
+      })
+      .catch(() => {
+        // Keep the setup screen available if account discovery is unavailable.
+        if (!cancelled) setEmail(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   function handleConnected(connectedEmail: string) {
     localStorage.setItem(ACCOUNT_KEY, connectedEmail);
@@ -347,6 +372,7 @@ export default function App() {
     setEmail(null);
   }
 
+  if (email === undefined) return null;
   if (!email) return <AccountSetup onConnected={handleConnected} />;
   return <InboxApp email={email} onLogout={handleLogout} />;
 }

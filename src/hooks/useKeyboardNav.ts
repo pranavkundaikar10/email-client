@@ -123,9 +123,14 @@ export function useKeyboardNav({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeSplitId, onSplitChange, onViewChange, splitNavigationEnabled, splits]);
 
-  // Escape — deselect
+  // Escape — clear bulk selection first, then close the active preview.
   useHotkeys("escape", (e) => {
     e.preventDefault();
+    const state = useAppStore.getState();
+    if (state.checkedThreadIds.size > 0) {
+      state.clearChecked();
+      return;
+    }
     setSelectedThread(null);
   }, { enableOnFormTags: false });
 

@@ -367,7 +367,22 @@ export default function App() {
     setEmail(connectedEmail);
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    if (!email) return;
+    const confirmed = window.confirm(
+      `Sign out of ${email}?\n\nYour locally synced email and AI data will stay on this device.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      // Signing out must remove the stored credential as well; otherwise the
+      // next launch would silently restore the account from local storage.
+      await api.removeAccount(email);
+    } catch (error) {
+      console.error("Could not remove the stored account:", error);
+      window.alert("Could not sign out. Please try again.");
+      return;
+    }
     localStorage.removeItem(ACCOUNT_KEY);
     setEmail(null);
   }

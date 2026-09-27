@@ -121,6 +121,8 @@ export interface FollowUpItem extends Thread {
 }
 
 export const api = {
+  getAccounts: () => invoke<string[]>("get_accounts"),
+
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
 

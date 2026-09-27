@@ -50,6 +50,15 @@ pub fn load_password(app: &AppHandle, email: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn get_accounts(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    Ok(load_store(&app)?
+        .accounts
+        .into_iter()
+        .map(|account| account.email)
+        .collect())
+}
+
+#[tauri::command]
 pub async fn add_account(
     app: tauri::AppHandle,
     email: String,

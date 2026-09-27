@@ -12,6 +12,11 @@ pub fn run() {
             let operation_worker = sync::MailOperationWorker::default();
             let worker_for_startup = operation_worker.clone();
             tauri::async_runtime::block_on(async move {
+                if let Err(error) = db::migrate_legacy_app_data(&app_handle) {
+                    // A migration problem should never prevent someone from
+                    // opening the app or setting it up normally.
+                    eprintln!("Could not migrate legacy application data: {error}");
+                }
                 let pool = db::init_db(&app_handle)
                     .await
                     .expect("failed to initialize database");
@@ -25,6 +30,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             auth::add_account,
+            auth::get_accounts,
             auth::remove_account,
             db::get_threads,
             db::get_messages,

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical, RefreshCw, Sparkles } from "lucide-react";
+import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical, RefreshCw } from "lucide-react";
 import { api, type SplitRule, type ThinkingSettings } from "../../lib/api";
 
 const RULE_TYPES: { value: SplitRule["type"]; label: string; hasValue: boolean }[] = [
@@ -33,6 +33,8 @@ function formatModelSize(bytes: number): string {
 
 interface Props { onClose: () => void; }
 
+type SettingsSection = "ai" | "inbox";
+
 export default function SplitsSettings({ onClose }: Props) {
   const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
@@ -40,6 +42,7 @@ export default function SplitsSettings({ onClose }: Props) {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [triagePreferences, setTriagePreferences] = useState<string | null>(null);
   const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("ai");
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -243,7 +246,7 @@ export default function SplitsSettings({ onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-white rounded-xl shadow-2xl w-[560px] max-h-[80vh] flex flex-col">
+      <div className="flex h-[min(590px,76vh)] w-[min(840px,92vw)] flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <h2 className="text-sm font-semibold text-gray-900">Settings</h2>
@@ -252,59 +255,82 @@ export default function SplitsSettings({ onClose }: Props) {
           </button>
         </div>
 
-        {/* Settings content */}
-        <div className="flex-1 overflow-y-auto px-6 py-3 space-y-3">
-          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+        <div className="flex min-h-0 flex-1">
+          <aside className="w-44 flex-shrink-0 border-r border-gray-100 bg-gray-50/60 px-3 py-4">
+            <p className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Settings</p>
+            <nav className="space-y-1" aria-label="Settings sections">
+              {([
+                ["ai", "AI"],
+                ["inbox", "Inbox organization"],
+              ] as const).map(([section, label]) => (
+                <button
+                  key={section}
+                  type="button"
+                  onClick={() => setActiveSection(section)}
+                  className={`w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                    activeSection === section
+                      ? "bg-white font-medium text-gray-900 shadow-sm ring-1 ring-gray-200"
+                      : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+          </aside>
+
+          {/* Each section keeps its own focused workspace while shared state
+              remains mounted in this dialog, so switching never discards edits. */}
+          <div className="min-w-0 flex-1 overflow-y-auto px-6 py-5">
+          {activeSection === "ai" && <div className="space-y-6">
+          <section>
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={14} className="text-indigo-500" />
-                <h3 className="text-xs font-semibold text-gray-800">Local AI model</h3>
-              </div>
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">AI</h3>
               <button
                 onClick={() => refetchModels()}
                 disabled={fetchingModels}
                 title="Refresh installed Ollama models"
-                className="text-gray-400 hover:text-gray-700 disabled:opacity-40"
+                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
               >
                 <RefreshCw size={13} className={fetchingModels ? "animate-spin" : ""} />
               </button>
             </div>
-            <p className="mt-1 text-xs text-gray-500">
-              Uses models installed in your local Ollama instance. Changing this affects future analyses only.
-            </p>
-            {ollamaError ? (
-              <p className="mt-2 text-xs text-red-600">
-                Could not reach Ollama. Start it, then refresh the list. {String(ollamaError)}
-              </p>
-            ) : (
-              <select
-                value={selectedModel ?? configuredModel ?? ""}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                disabled={ollamaModels.length === 0}
-                className="mt-3 w-full rounded-md border border-indigo-100 bg-white px-2.5 py-2 text-xs text-gray-700 outline-none focus:border-indigo-400 disabled:opacity-50"
-              >
-                {ollamaModels.length === 0 ? (
-                  <option value="">No local models found</option>
+            <div className="mt-2 rounded-lg border border-gray-200 bg-white">
+              <div className="flex items-center justify-between gap-4 px-3 py-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-gray-700">Local AI model</p>
+                  <p className="mt-0.5 text-[11px] text-gray-400">Used for future analyses</p>
+                </div>
+                {ollamaError ? (
+                  <p className="max-w-56 text-right text-[11px] text-red-600">Could not reach Ollama</p>
                 ) : (
-                  ollamaModels.map((model) => (
-                    <option key={model.name} value={model.name}>
-                      {model.name}{model.size ? ` — ${formatModelSize(model.size)}` : ""}
-                    </option>
-                  ))
+                  <select
+                    value={selectedModel ?? configuredModel ?? ""}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    disabled={ollamaModels.length === 0}
+                    className="max-w-64 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 outline-none focus:border-indigo-400 disabled:opacity-50"
+                  >
+                    {ollamaModels.length === 0 ? (
+                      <option value="">No local models found</option>
+                    ) : (
+                      ollamaModels.map((model) => (
+                        <option key={model.name} value={model.name}>
+                          {model.name}{model.size ? ` — ${formatModelSize(model.size)}` : ""}
+                        </option>
+                      ))
+                    )}
+                  </select>
                 )}
-              </select>
-            )}
+              </div>
+            </div>
           </section>
 
-          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
-            <div className="flex items-center gap-1.5">
-              <Sparkles size={14} className="text-indigo-500" />
-              <h3 className="text-xs font-semibold text-gray-800">Thinking mode</h3>
-            </div>
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Thinking mode</h3>
             <p className="mt-1 text-xs text-gray-500">
               Reasoning can improve difficult triage, but makes local analysis slower.
             </p>
-            <div className="mt-3 divide-y divide-indigo-100 rounded-md border border-indigo-100 bg-white">
+            <div className="mt-2 divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
               {([
                 ["manual", "Manual analysis", "Used when you choose Analyze for an email."],
                 ["background", "Review Queue", "Used for automatic Review Queue processing."],
@@ -327,17 +353,14 @@ export default function SplitsSettings({ onClose }: Props) {
             </div>
           </section>
 
-          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+          <section>
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={14} className="text-indigo-500" />
-                <h3 className="text-xs font-semibold text-gray-800">AI triage preferences</h3>
-              </div>
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">AI triage preferences</h3>
               <button
                 type="button"
                 onClick={() => setTriagePreferences("")}
                 disabled={!(triagePreferences ?? savedTriagePreferences)}
-                className="text-[11px] font-medium text-gray-500 hover:text-gray-800 disabled:opacity-40"
+                className="rounded px-1.5 py-1 text-[11px] font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-800 disabled:opacity-40"
               >
                 Reset
               </button>
@@ -351,17 +374,22 @@ export default function SplitsSettings({ onClose }: Props) {
               maxLength={1000}
               rows={5}
               placeholder="Example: I’m targeting backend and platform engineering roles. Prioritize recruiter scheduling, assessments, interviews, visa questions, and deadlines."
-              className="mt-3 w-full resize-y rounded-md border border-indigo-100 bg-white px-2.5 py-2 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300 focus:border-indigo-400"
+              className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300 focus:border-indigo-400"
             />
             <div className="mt-1.5 flex items-start justify-between gap-3 text-[10px] text-gray-400">
               <span>Core JSON rules and attachment protection always remain enabled.</span>
               <span className="flex-shrink-0">{(triagePreferences ?? savedTriagePreferences).length}/1000</span>
             </div>
           </section>
+          </div>}
 
-          <p className="pt-1 text-xs text-gray-400">
+          {activeSection === "inbox" && <div className="space-y-4">
+          <div>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Inbox organization</h3>
+          <p className="mt-1 text-xs text-gray-500">
             Split inbox rules: emails are assigned to the first matching split. A split with no rules is a catch-all.
           </p>
+          </div>
 
           {/* Splits list */}
           {effective.map((split, idx) => (
@@ -467,6 +495,8 @@ export default function SplitsSettings({ onClose }: Props) {
             <Plus size={14} />
             Add split
           </button>
+          </div>}
+          </div>
         </div>
 
         {/* Footer */}
@@ -474,7 +504,7 @@ export default function SplitsSettings({ onClose }: Props) {
           {error ? (
             <p className="text-xs text-red-500 truncate">{error}</p>
           ) : (
-            <p className="text-xs text-gray-400">Changes apply to all synced emails</p>
+            <span />
           )}
           <div className="flex gap-2">
             <button

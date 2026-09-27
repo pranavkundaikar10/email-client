@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArrowRight, Bookmark, CalendarClock, Check, Eye, X } from "lucide-react";
-import { api, type ReviewItem } from "../../lib/api";
+import { api } from "../../lib/api";
 import { useAppStore } from "../../store";
 import { useMailActions } from "../../hooks/useMailActions";
+import { recommendationLabel, recommendationTone } from "../../lib/recommendations";
 
 function actionItems(json: string): string[] {
   try {
@@ -19,13 +20,6 @@ function severity(importance: number): string {
   if (importance >= 4) return "High";
   if (importance >= 3) return "Medium";
   return "Low";
-}
-
-function recommendation(item: ReviewItem): "archive" | "keep" | "review" {
-  if (item.category === "assessment" || item.category === "interview" || item.category === "offer" || item.category === "deadline") return "keep";
-  if (item.is_actionable || item.importance >= 3) return "review";
-  if (item.category === "rejection" || item.category === "newsletter" || item.importance <= 2) return "archive";
-  return "review";
 }
 
 export default function ReviewQueue({ onClose }: { onClose: () => void }) {
@@ -64,7 +58,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
     onClose();
   }
 
-  const suggested = item && recommendation(item);
+  const suggested = item?.recommended_action;
   const items = item ? actionItems(item.action_items) : [];
 
   return (
@@ -111,8 +105,8 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
 
                 <div className="mt-4 flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2.5">
                   <span className="text-xs text-gray-500">Suggested decision</span>
-                  <span className={`text-xs font-semibold ${suggested === "archive" ? "text-gray-600" : suggested === "keep" ? "text-emerald-700" : "text-amber-700"}`}>
-                    {suggested === "archive" ? "Archive — low risk" : suggested === "keep" ? "Keep in inbox" : "Needs your review"}
+                  <span className={`text-xs font-semibold ${suggested ? recommendationTone(suggested) : "text-amber-700"}`}>
+                    {suggested ? recommendationLabel(suggested) : "Needs your review"}
                   </span>
                 </div>
               </>

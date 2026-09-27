@@ -18,6 +18,7 @@ pub struct AnalysisRow {
     pub summary: String,
     pub action_items: String, // JSON array, kept as string like `rules`/`label_ids` elsewhere in this codebase
     pub deadline: Option<String>,
+    pub recommended_action: String,
     pub model: String,
     pub analyzed_at: String,
 }
@@ -84,6 +85,7 @@ pub struct ReviewItem {
     pub action_items: String,
     pub deadline: Option<String>,
     pub is_actionable: bool,
+    pub recommended_action: String,
 }
 
 /// What we ask the model to return. `format: "json"` on the Ollama request
@@ -106,10 +108,13 @@ struct ModelPayload {
     action_items: Vec<String>,
     #[serde(default)]
     deadline: Option<String>,
+    #[serde(default = "default_recommended_action")]
+    recommended_action: String,
 }
 
 fn default_importance() -> i64 { 3 }
 fn default_category() -> String { "other".to_string() }
+fn default_recommended_action() -> String { "review".to_string() }
 
 #[derive(Serialize)]
 struct OllamaRequest<'a> {
@@ -210,10 +215,14 @@ Respond with ONLY a JSON object, no other text, matching exactly:
   "job_category": "confirmation|rejection|assessment|screening|interview|offer|other" or "",
   "summary": "one sentence, under 25 words",
   "action_items": ["short imperative next step", "..."],
-  "deadline": "YYYY-MM-DD" or null if none stated
+  "deadline": "YYYY-MM-DD" or null if none stated,
+  "recommended_action": "keep|follow_up|archive|delete|review"
 }
 If the email is a newsletter, marketing, or has nothing to act on, set
-is_actionable to false, importance to 1 or 2, and action_items to []."#.to_string();
+is_actionable to false, importance to 1 or 2, and action_items to []. Choose
+delete only for an unmistakably promotional or marketing email when the user's
+preferences support it; otherwise prefer archive for low-value email. Never
+recommend delete for an email with an attachment. Use review when uncertain."#.to_string();
 
     if !triage_preferences.trim().is_empty() {
         prompt.push_str(
@@ -232,6 +241,13 @@ fn normalized_job_category(is_job_related: bool, category: &str) -> Option<Strin
     match category.as_str() {
         "confirmation" | "rejection" | "assessment" | "screening" | "interview" | "offer" | "other" => Some(category),
         _ => Some("other".to_string()),
+    }
+}
+
+fn normalized_recommended_action(action: &str) -> String {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "keep" | "follow_up" | "archive" | "delete" | "review" => action.trim().to_ascii_lowercase(),
+        _ => "review".to_string(),
     }
 }
 
@@ -409,13 +425,18 @@ pub async fn analyze_thread(
         serde_json::to_string(&payload.action_items).unwrap_or_else(|_| "[]".to_string());
     let importance = payload.importance.clamp(1, 5);
     let job_category = normalized_job_category(payload.is_job_related, &payload.job_category);
+    let recommended_action = if has_attachments {
+        "review".to_string()
+    } else {
+        normalized_recommended_action(&payload.recommended_action)
+    };
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
         r#"
         INSERT INTO email_analysis
-            (thread_id, is_actionable, importance, category, is_job_related, job_category, summary, action_items, deadline, model, analyzed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, is_actionable, importance, category, is_job_related, job_category, summary, action_items, deadline, recommended_action, model, analyzed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             is_actionable = excluded.is_actionable,
             importance    = excluded.importance,
@@ -425,6 +446,7 @@ pub async fn analyze_thread(
             summary       = excluded.summary,
             action_items  = excluded.action_items,
             deadline      = excluded.deadline,
+            recommended_action = excluded.recommended_action,
             model         = excluded.model,
             analyzed_at   = excluded.analyzed_at
         "#,
@@ -438,6 +460,7 @@ pub async fn analyze_thread(
     .bind(&payload.summary)
     .bind(&action_items_json)
     .bind(&payload.deadline)
+    .bind(&recommended_action)
     .bind(&model)
     .bind(&now)
     .execute(pool.inner())
@@ -454,6 +477,7 @@ pub async fn analyze_thread(
         summary: payload.summary,
         action_items: action_items_json,
         deadline: payload.deadline,
+        recommended_action,
         model,
         analyzed_at: now,
     })
@@ -701,7 +725,7 @@ pub async fn get_review_queue(
                COALESCE(m.from_email, '') AS from_email,
                COALESCE(m.to_emails, '[]') AS to_emails,
                a.importance, a.category, a.summary, a.action_items,
-               a.deadline, a.is_actionable
+               a.deadline, a.is_actionable, a.recommended_action
         FROM email_analysis a
         JOIN threads t ON t.id = a.thread_id
         LEFT JOIN messages m ON m.thread_id = t.id

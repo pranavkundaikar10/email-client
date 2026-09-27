@@ -26,11 +26,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            arch: intel
-          - os: macos-14
-            arch: apple-silicon
-    runs-on: ${{ matrix.os }}
+          - arch: apple-silicon
+            target: aarch64-apple-darwin
+          - arch: intel
+            target: x86_64-apple-darwin
+    # Apple Silicon hosted runners are much more readily available than the
+    # legacy Intel macOS pool. macOS ships the SDK needed to cross-compile the
+    # Intel target, so both installable DMGs can build here without queueing a
+    # second, scarce runner.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,12 +42,13 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.target }}
       - run: npm ci
-      - run: npm run tauri build
+      - run: npm run tauri -- build --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: productive-email-macos-${{ matrix.arch }}
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   linux:

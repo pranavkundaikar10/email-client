@@ -89,8 +89,9 @@ img{max-width:100% !important;height:auto !important}
     }
   });
   document.addEventListener('keydown',function(e){
-    if(/^[jkesux#]$/i.test(e.key)||e.key==='Escape'){
-      window.parent.postMessage({type:'keydown',key:e.key},'*');
+    if(/^[jkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
+      if(e.key==='Tab')e.preventDefault();
+      window.parent.postMessage({type:'keydown',key:e.key,shiftKey:e.shiftKey},'*');
     }
   });
 })();<\/script></body></html>`;
@@ -402,6 +403,10 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       if (e.data?.type !== "keydown") return;
       const key = String(e.data.key).toLowerCase();
       const threadId = useAppStore.getState().selectedThreadId;
+      if (key === "tab") {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: Boolean(e.data.shiftKey), bubbles: true }));
+        return;
+      }
 
       if (key === "j") { selectNextThread(); return; }
       if (key === "k") { selectPrevThread(); return; }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import ThreadItem from "../email/ThreadItem";
 import BulkActionBar from "../email/BulkActionBar";
@@ -21,6 +21,11 @@ export default function ReviewList() {
   const { data: queue = [], isLoading } = useQuery({
     queryKey: ["review_queue", sort],
     queryFn: () => api.getReviewQueue(50, sort),
+    refetchInterval: 60_000,
+  });
+  const { data: pendingCount = 0 } = useQuery({
+    queryKey: ["auto_analysis_pending_count"],
+    queryFn: api.getAutoAnalysisPendingCount,
     refetchInterval: 60_000,
   });
 
@@ -85,9 +90,14 @@ export default function ReviewList() {
   if (isLoading) return <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
   if (queue.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-      <Check size={22} className="text-emerald-500" />
-      <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
-      <p className="mt-1 text-xs text-gray-400">New analyzed emails will appear here automatically.</p>
+      {pendingCount > 0 ? <>
+        <LoaderCircle size={22} className="animate-spin text-violet-500" />
+        <p className="mt-3 text-sm font-medium text-gray-700">Preparing {pendingCount} {pendingCount === 1 ? "email" : "emails"}</p>
+      </> : <>
+        <Check size={22} className="text-emerald-500" />
+        <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
+        <p className="mt-1 text-xs text-gray-400">New analyzed emails will appear here automatically.</p>
+      </>}
     </div>;
   }
 
@@ -99,8 +109,16 @@ export default function ReviewList() {
       onClear={clearChecked}
     />
     <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
-      <div>
+      <div className="flex items-center gap-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{queue.length} to review</span>
+        {pendingCount > 0 && <span
+          className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-violet-500"
+          title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
+          aria-label={`${pendingCount} ${pendingCount === 1 ? "email" : "emails"} awaiting AI analysis`}
+        >
+          <LoaderCircle size={10} className="animate-spin" />
+          {pendingCount}
+        </span>}
       </div>
       <div className="flex items-center gap-2">
         <select

@@ -119,9 +119,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
         // BODY.PEEK fetches the content without changing Gmail's read state.
         await api.fetchMessageBody(email, candidate.message_id);
-        // Background triage favors fast, deterministic structured extraction.
-        // Manual Analyze remains available with the model's default thinking.
-        await api.analyzeThread(candidate.thread_id, undefined, undefined, false);
+        await api.analyzeThread(candidate.thread_id, undefined, undefined, "background");
         queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
         queryClient.invalidateQueries({ queryKey: ["digest"] });
         // The pending indicator and Review list must transition together once

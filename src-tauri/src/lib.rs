@@ -57,6 +57,8 @@ pub fn run() {
             agent::set_ai_model,
             agent::get_triage_preferences,
             agent::set_triage_preferences,
+            agent::get_thinking_settings,
+            agent::set_thinking_settings,
             agent::get_auto_analysis_candidates,
             agent::get_auto_analysis_pending_count,
             agent::get_review_queue,

@@ -46,6 +46,21 @@ pub struct AutoAnalysisCandidate {
     pub message_id: String,
 }
 
+/// User-controlled thinking behavior for the two analysis workloads. Manual
+/// analysis favors depth by default; the background review queue favors a
+/// responsive, low-impact laptop experience by default.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ThinkingSettings {
+    pub manual: bool,
+    pub background: bool,
+}
+
+impl Default for ThinkingSettings {
+    fn default() -> Self {
+        Self { manual: true, background: false }
+    }
+}
+
 /// An analyzed email waiting for the user's explicit triage decision.
 #[derive(Debug, Serialize, FromRow)]
 pub struct ReviewItem {
@@ -158,6 +173,19 @@ async fn configured_triage_preferences(pool: &SqlitePool) -> Result<String, Stri
         .map(|preferences| preferences.unwrap_or_default())
 }
 
+async fn configured_thinking_settings(pool: &SqlitePool) -> Result<ThinkingSettings, String> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_settings WHERE key = 'ai_thinking_settings'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(stored
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default())
+}
+
 fn system_prompt(triage_preferences: &str) -> String {
     let mut prompt = r#"You are an assistant that triages a job-seeker's email inbox. For the
 single email given, decide whether it needs action and extract concrete next
@@ -252,8 +280,7 @@ async fn call_model(
         format: "json",
         stream: false,
         think,
-        // The background queue only needs a compact structured decision. When
-        // thinking is disabled this cap applies to the final JSON response,
+        // When thinking is disabled this cap applies to the final JSON response,
         // preventing a malformed or overly verbose reply from monopolizing
         // the local model.
         options: think.map(|thinking_enabled| (!thinking_enabled).then_some(OllamaOptions {
@@ -334,7 +361,7 @@ pub async fn analyze_thread(
     thread_id: String,
     model: Option<String>,
     base_url: Option<String>,
-    think: Option<bool>,
+    analysis_mode: Option<String>,
 ) -> Result<AnalysisRow, String> {
     let model = match model {
         Some(model) => model,
@@ -342,6 +369,12 @@ pub async fn analyze_thread(
     };
     let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
     let triage_preferences = configured_triage_preferences(pool.inner()).await?;
+    let thinking_settings = configured_thinking_settings(pool.inner()).await?;
+    let think = match analysis_mode.as_deref() {
+        Some("background") => thinking_settings.background,
+        Some("manual") | None => thinking_settings.manual,
+        Some(_) => return Err("invalid analysis mode".to_string()),
+    };
 
     let (from_name, from_email, subject, body, has_attachments) =
         latest_message_text(pool.inner(), &thread_id).await?;
@@ -352,7 +385,7 @@ pub async fn analyze_thread(
         &model,
         system_prompt(&triage_preferences),
         prompt,
-        think,
+        Some(think),
     )
     .await?;
 
@@ -501,6 +534,30 @@ pub async fn set_triage_preferences(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_thinking_settings(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<ThinkingSettings, String> {
+    configured_thinking_settings(pool.inner()).await
+}
+
+#[tauri::command]
+pub async fn set_thinking_settings(
+    pool: tauri::State<'_, SqlitePool>,
+    settings: ThinkingSettings,
+) -> Result<(), String> {
+    let value = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO app_settings (key, value) VALUES ('ai_thinking_settings', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(value)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Analyze every unread inbox thread that is new or has changed since it was
 /// last analyzed. Runs sequentially (one Ollama call per email) and skips
 /// threads that fail rather than aborting the whole batch, so one bad email
@@ -511,7 +568,7 @@ pub async fn analyze_inbox(
     model: Option<String>,
     base_url: Option<String>,
     limit: Option<i64>,
-    think: Option<bool>,
+    analysis_mode: Option<String>,
 ) -> Result<Vec<AnalysisRow>, String> {
     let limit = limit.unwrap_or(25);
 
@@ -534,7 +591,7 @@ pub async fn analyze_inbox(
 
     let mut results = Vec::new();
     for thread_id in stale_thread_ids {
-        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone(), think).await {
+        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone(), analysis_mode.clone()).await {
             Ok(row) => results.push(row),
             Err(e) => {
                 // Don't let one unparseable/unreachable email kill the batch.

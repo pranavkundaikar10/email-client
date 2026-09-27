@@ -569,7 +569,12 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
 
       if (key === "j") { selectNextThread(); return; }
       if (key === "k") { selectPrevThread(); return; }
-      if (key === "escape") { setSelectedThread(null); return; }
+      if (key === "escape") {
+        const state = useAppStore.getState();
+        if (state.checkedThreadIds.size > 0) state.clearChecked();
+        else setSelectedThread(null);
+        return;
+      }
       if (!threadId) return;
       if (key === "f" && ((reviewMode && reviewItem) || (followUpMode && followUpItem))) {
         setFollowUpPickerOpen(true);

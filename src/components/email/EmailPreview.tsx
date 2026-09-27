@@ -89,7 +89,7 @@ img{max-width:100% !important;height:auto !important}
     }
   });
   document.addEventListener('keydown',function(e){
-    if(/^[jkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
+    if(/^[ijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
       if(e.key==='Tab')e.preventDefault();
       window.parent.postMessage({type:'keydown',key:e.key,shiftKey:e.shiftKey},'*');
     }
@@ -369,6 +369,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       await api.recordReviewDecision(threadId, decision);
     },
     onSuccess: (_, { decision }) => {
+      void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
       addToast(decision === "archived" ? "Archive queued" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
     },
     onError: (err) => addToast(`Could not save review decision: ${String(err)}`),
@@ -386,7 +388,13 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-      if (e.key === "#" && selectedThreadId) {
+      const key = e.key.toLowerCase();
+      if (key === "i" && reviewMode && reviewItem && !savingReview) {
+        e.preventDefault();
+        recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
+        return;
+      }
+      if (key === "#" && selectedThreadId) {
         if (useAppStore.getState().checkedThreadIds.size > 0) return; // bulk handled by useKeyboardNav
         e.preventDefault();
         deleteThread(selectedThreadId);
@@ -394,7 +402,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteThread, selectedThreadId]);
+  }, [deleteThread, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
 
   // Handle keyboard shortcuts forwarded from the email iframe via postMessage.
   // useHotkeys is bypassed because hotkeys-js checks keyCode which synthetic events lack.
@@ -412,6 +420,10 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       if (key === "k") { selectPrevThread(); return; }
       if (key === "escape") { setSelectedThread(null); return; }
       if (!threadId) return;
+      if (key === "i" && reviewMode && reviewItem && !savingReview) {
+        recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
+        return;
+      }
       if (key === "e") { archive(threadId); return; }
       if (key === "#") {
         if (useAppStore.getState().checkedThreadIds.size > 0) return;
@@ -429,7 +441,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, markRead, setStarred]);
+  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, markRead, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
 
   useEffect(() => {
     if (!selectedThreadId) return;

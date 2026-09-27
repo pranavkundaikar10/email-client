@@ -16,7 +16,18 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 - Gradually analyzes at most one eligible email per sync cycle (once per minute), limited to unarchived Inbox mail received today.
 - Includes a human-approved review queue: the model suggests context, but you choose whether to keep, follow up on, or archive a message.
 
-## Install prerequisites
+## Install a macOS release
+
+Download the DMG for your Mac from the repository's **Releases** page:
+
+- **Apple Silicon** for M1, M2, M3, M4, and newer Macs.
+- **Intel** for older Intel-based Macs.
+
+Open the DMG and drag **Productive Email** to Applications. Early releases are unsigned, so macOS will require a one-time **Control-click → Open** confirmation on first launch. The app itself contains its database and all required runtime code: you do not need Node.js, Rust, Tauri, Xcode, or a terminal.
+
+You still need [Ollama](https://ollama.com/) installed and running locally, plus a Gmail App Password. After installing Ollama, run `ollama pull gemma4:e4b` in Terminal (or install another supported local model and select it in Settings).
+
+## Development prerequisites
 
 The current credential-storage implementation uses Unix file-permission APIs, so macOS and Linux are the supported development platforms. Windows needs credential-storage work before it should be considered supported.
 
@@ -89,7 +100,7 @@ Background analysis is deliberately rate-limited: it processes one new eligible 
 
 The **Review** view is approval-first:
 
-- **Keep** and **Follow up** save a local review decision only. They do not change Gmail. Follow up is currently a label, not a reminder or snooze feature.
+- **Keep** saves a local review decision only. It does not change Gmail. **Follow up** schedules a local reminder in the Follow-ups view; it does not modify Gmail by itself.
 - **Archive** is an explicit remote action. It removes the message from the Gmail Inbox (equivalent to Gmail Archive) and keeps it in All Mail; it does not delete the message.
 - Opening an email currently marks it read locally and synchronizes Gmail’s `\Seen` flag.
 

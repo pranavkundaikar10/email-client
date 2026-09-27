@@ -4,7 +4,7 @@ import { useAppStore } from "../store";
 import { useMailActions } from "./useMailActions";
 import { useMailFlags } from "./useMailFlags";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
 
 interface Options {
   onViewChange: (view: View) => void;
@@ -141,7 +141,7 @@ export function useKeyboardNav({
     setCommandPaletteOpen(true);
   }, { enableOnFormTags: true });
 
-  // G-sequences: G then I/S/A or 1/2/3 within 1 second
+  // G-sequences: G then I/R/S/A or 1/2/3 within 1 second
   useEffect(() => {
     let gPressed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -160,7 +160,12 @@ export function useKeyboardNav({
       if (gPressed) {
         gPressed = false;
         clearTimeout(timer);
+        // G-sequences take precedence over a single-key review action such as
+        // I = Keep, so G then I remains a reliable "go to Inbox" shortcut.
+        e.preventDefault();
+        e.stopImmediatePropagation();
         if (e.key === "i" || e.key === "I") { e.preventDefault(); onViewChange("inbox"); }
+        else if (e.key === "r" || e.key === "R") { e.preventDefault(); onViewChange("review"); }
         else if (e.key === "s" || e.key === "S") { e.preventDefault(); onViewChange("starred"); }
         else if (e.key === "a" || e.key === "A") { e.preventDefault(); onViewChange("archive"); }
         else if (e.key === "n" || e.key === "N") { e.preventDefault(); onViewChange("sent"); }
@@ -175,7 +180,9 @@ export function useKeyboardNav({
       }
     }
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    // Capture lets an established G-sequence consume its second key before a
+    // view-level single-key action observes it.
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [onViewChange, splits, onSplitChange]);
 }

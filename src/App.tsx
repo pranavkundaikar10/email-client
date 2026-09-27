@@ -42,7 +42,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen);
   const activeSplitId = useAppStore((s) => s.activeSplitId);
   const setActiveSplitId = useAppStore((s) => s.setActiveSplitId);
-  const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -124,12 +123,21 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
   function switchTab(id: string) {
     startupViewResolved.current = true;
+    if (id !== effectiveSplitId) {
+      const state = useAppStore.getState();
+      state.clearChecked();
+      state.setSelectedThread(null);
+    }
     setActiveSplitId(id);
-    setSelectedThread(null);
   }
 
   function changeView(view: View) {
     startupViewResolved.current = true;
+    if (view !== activeView) {
+      const state = useAppStore.getState();
+      state.clearChecked();
+      state.setSelectedThread(null);
+    }
     setActiveView(view);
   }
 
@@ -137,7 +145,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     onViewChange: changeView,
     onSearchFocus: () => { searchInputRef.current?.focus(); },
     splits: splitDefs,
-    onSplitChange: (id) => { startupViewResolved.current = true; setActiveView("inbox"); setActiveSplitId(id); },
+    onSplitChange: switchTab,
     activeSplitId: effectiveSplitId,
     splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen && !shortcutsOpen,
   });
@@ -312,7 +320,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           onViewChange={changeView}
           onClose={() => setCommandPaletteOpen(false)}
           splits={splitDefs}
-          onSplitChange={(id) => { startupViewResolved.current = true; setActiveView("inbox"); setActiveSplitId(id); }}
+          onSplitChange={switchTab}
           onSplitsSettings={() => setSplitsOpen(true)}
         />
       )}

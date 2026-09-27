@@ -16,7 +16,9 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 - Gradually analyzes at most one eligible email per sync cycle (once per minute), limited to unarchived Inbox mail received today.
 - Includes a human-approved review queue: the model suggests context, but you choose whether to keep, follow up on, or archive a message.
 
-## Install a macOS release
+## Install a release
+
+### macOS
 
 Download the DMG for your Mac from the repository's **Releases** page:
 
@@ -24,6 +26,13 @@ Download the DMG for your Mac from the repository's **Releases** page:
 - **Intel** for older Intel-based Macs.
 
 Open the DMG and drag **Productive Email** to Applications. Early releases are unsigned, so macOS will require a one-time **Control-click → Open** confirmation on first launch. The app itself contains its database and all required runtime code: you do not need Node.js, Rust, Tauri, Xcode, or a terminal.
+
+### Linux
+
+Linux releases are built for 64-bit Intel/AMD computers. Download the format that fits your system:
+
+- **`.AppImage`** for most Linux distributions. Mark it executable in its file properties, then open it.
+- **`.deb`** for Ubuntu, Debian, and compatible distributions. Open it with the system package installer.
 
 You still need [Ollama](https://ollama.com/) installed and running locally, plus a Gmail App Password. After installing Ollama, run `ollama pull gemma4:e4b` in Terminal (or install another supported local model and select it in Settings).
 

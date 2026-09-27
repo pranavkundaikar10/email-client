@@ -1,4 +1,4 @@
-name: Build macOS installer
+name: Build desktop installers
 
 on:
   workflow_dispatch:
@@ -46,8 +46,41 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - run: npm ci
+      - run: npm run tauri -- build --bundles appimage,deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: productive-email-linux-x86_64
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, linux]
     if: github.event_name == 'push' || (inputs.publish && inputs.release_tag != '')
     runs-on: ubuntu-latest
     permissions:
@@ -56,10 +89,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
-          pattern: productive-email-macos-*
+          pattern: productive-email-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
           generate_release_notes: true
-          files: release-assets/**/*.dmg
+          files: |
+            release-assets/**/*.dmg
+            release-assets/**/*.AppImage
+            release-assets/**/*.deb

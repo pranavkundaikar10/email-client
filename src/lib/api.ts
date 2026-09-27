@@ -96,6 +96,11 @@ export interface OllamaModel {
   modified_at: string | null;
 }
 
+export interface ThinkingSettings {
+  manual: boolean;
+  background: boolean;
+}
+
 export interface ReviewItem extends Thread {
   thread_id: string;
   importance: number;
@@ -184,11 +189,11 @@ export const api = {
 
   // Agent — local-LLM email triage. `model`/`baseUrl` are optional overrides
   // for the Ollama model name / server URL (defaults live on the Rust side).
-  analyzeThread: (threadId: string, model?: string, baseUrl?: string, think?: boolean) =>
-    invoke<ThreadAnalysis>("analyze_thread", { threadId, model, baseUrl, think }),
+  analyzeThread: (threadId: string, model?: string, baseUrl?: string, analysisMode?: "manual" | "background") =>
+    invoke<ThreadAnalysis>("analyze_thread", { threadId, model, baseUrl, analysisMode }),
 
-  analyzeInbox: (model?: string, baseUrl?: string, limit?: number, think?: boolean) =>
-    invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit, think }),
+  analyzeInbox: (model?: string, baseUrl?: string, limit?: number, analysisMode?: "manual" | "background") =>
+    invoke<ThreadAnalysis[]>("analyze_inbox", { model, baseUrl, limit, analysisMode }),
 
   getOllamaModels: () =>
     invoke<OllamaModel[]>("get_ollama_models"),
@@ -204,6 +209,12 @@ export const api = {
 
   setTriagePreferences: (preferences: string) =>
     invoke<void>("set_triage_preferences", { preferences }),
+
+  getThinkingSettings: () =>
+    invoke<ThinkingSettings>("get_thinking_settings"),
+
+  setThinkingSettings: (settings: ThinkingSettings) =>
+    invoke<void>("set_thinking_settings", { settings }),
 
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),

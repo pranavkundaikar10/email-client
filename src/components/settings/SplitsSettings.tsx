@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical, RefreshCw, Sparkles } from "lucide-react";
-import { api, type SplitRule } from "../../lib/api";
+import { api, type SplitRule, type ThinkingSettings } from "../../lib/api";
 
 const RULE_TYPES: { value: SplitRule["type"]; label: string; hasValue: boolean }[] = [
   { value: "is_newsletter",    label: "Is a newsletter / mailing list", hasValue: false },
@@ -39,6 +39,7 @@ export default function SplitsSettings({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [triagePreferences, setTriagePreferences] = useState<string | null>(null);
+  const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings | null>(null);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -67,6 +68,14 @@ export default function SplitsSettings({ onClose }: Props) {
   });
 
   const {
+    data: savedThinkingSettings = { manual: true, background: false },
+    isSuccess: thinkingSettingsLoaded,
+  } = useQuery({
+    queryKey: ["ai_thinking_settings"],
+    queryFn: api.getThinkingSettings,
+  });
+
+  const {
     data: ollamaModels = [],
     error: ollamaError,
     isFetching: fetchingModels,
@@ -88,6 +97,12 @@ export default function SplitsSettings({ onClose }: Props) {
       setTriagePreferences(savedTriagePreferences);
     }
   }, [savedTriagePreferences, triagePreferences, triagePreferencesLoaded]);
+
+  useEffect(() => {
+    if (thinkingSettingsLoaded && thinkingSettings === null) {
+      setThinkingSettings(savedThinkingSettings);
+    }
+  }, [savedThinkingSettings, thinkingSettings, thinkingSettingsLoaded]);
 
   const [splits, setSplits] = useState<LocalSplit[] | null>(null);
   const effective = splits ?? rawSplits.map(parseSplit);
@@ -181,6 +196,13 @@ export default function SplitsSettings({ onClose }: Props) {
       if (normalizedPreferences !== savedTriagePreferences) {
         await api.setTriagePreferences(normalizedPreferences);
       }
+      const effectiveThinkingSettings = thinkingSettings ?? savedThinkingSettings;
+      if (
+        effectiveThinkingSettings.manual !== savedThinkingSettings.manual ||
+        effectiveThinkingSettings.background !== savedThinkingSettings.background
+      ) {
+        await api.setThinkingSettings(effectiveThinkingSettings);
+      }
       const existing = new Set(rawSplits.map((s) => s.id));
       const kept = new Set(effective.map((s) => s.id));
 
@@ -209,6 +231,7 @@ export default function SplitsSettings({ onClose }: Props) {
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["ai_model"] });
       queryClient.invalidateQueries({ queryKey: ["triage_preferences"] });
+      queryClient.invalidateQueries({ queryKey: ["ai_thinking_settings"] });
       setSplits(null);
       onClose();
     } catch (e) {
@@ -271,6 +294,37 @@ export default function SplitsSettings({ onClose }: Props) {
                 )}
               </select>
             )}
+          </section>
+
+          <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">
+            <div className="flex items-center gap-1.5">
+              <Sparkles size={14} className="text-indigo-500" />
+              <h3 className="text-xs font-semibold text-gray-800">Thinking mode</h3>
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Reasoning can improve difficult triage, but makes local analysis slower.
+            </p>
+            <div className="mt-3 divide-y divide-indigo-100 rounded-md border border-indigo-100 bg-white">
+              {([
+                ["manual", "Manual analysis", "Used when you choose Analyze for an email."],
+                ["background", "Review Queue", "Used for automatic Review Queue processing."],
+              ] as const).map(([key, label, description]) => {
+                const effectiveThinkingSettings = thinkingSettings ?? savedThinkingSettings;
+                return <label key={key} className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5">
+                  <span>
+                    <span className="block text-xs font-medium text-gray-700">{label}</span>
+                    <span className="mt-0.5 block text-[11px] text-gray-400">{description}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={effectiveThinkingSettings[key]}
+                    onChange={(event) => setThinkingSettings({ ...effectiveThinkingSettings, [key]: event.target.checked })}
+                    className="h-4 w-4 accent-indigo-600"
+                    aria-label={`${label} thinking mode`}
+                  />
+                </label>;
+              })}
+            </div>
           </section>
 
           <section className="rounded-lg border border-indigo-100 bg-indigo-50/40 px-4 py-3">

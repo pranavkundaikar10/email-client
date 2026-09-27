@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, MailOpen, Reply, Trash2, Sparkles } from "lucide-react";
+import { Archive, CalendarClock, MailOpen, Reply, Trash2, Sparkles, X } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
@@ -89,7 +89,7 @@ img{max-width:100% !important;height:auto !important}
     }
   });
   document.addEventListener('keydown',function(e){
-    if(/^[ijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
+    if(/^[fijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
       if(e.key==='Tab')e.preventDefault();
       window.parent.postMessage({type:'keydown',key:e.key,shiftKey:e.shiftKey},'*');
     }
@@ -305,7 +305,114 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
   );
 }
 
-export default function EmailPreview({ email, reviewMode = false }: { email: string; reviewMode?: boolean }) {
+function withTime(date: Date, hour = 9, minute = 0) {
+  const result = new Date(date);
+  result.setHours(hour, minute, 0, 0);
+  return result;
+}
+
+function parseFollowUpTime(expression: string): Date | null {
+  const normalized = expression.trim().toLowerCase().replace(/,/g, " ").replace(/\s+/g, " ");
+  if (!normalized) return null;
+  const now = new Date();
+  let timeHour = 9;
+  let timeMinute = 0;
+  const timeMatch = normalized.match(/(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+  const dateExpression = timeMatch ? normalized.slice(0, timeMatch.index).trim() : normalized;
+  if (timeMatch) {
+    timeHour = Number(timeMatch[1]);
+    timeMinute = Number(timeMatch[2] ?? 0);
+    const meridiem = timeMatch[3];
+    if (timeHour < 1 || timeHour > 12 || timeMinute > 59) return null;
+    if (meridiem === "pm" && timeHour !== 12) timeHour += 12;
+    if (meridiem === "am" && timeHour === 12) timeHour = 0;
+  }
+
+  let date: Date | null = null;
+  if (dateExpression === "today") {
+    date = new Date(now);
+  } else if (dateExpression === "tomorrow") {
+    date = new Date(now);
+    date.setDate(date.getDate() + 1);
+  } else {
+    const relative = dateExpression.match(/^in (\d+) (day|days|week|weeks)$/);
+    if (relative) {
+      date = new Date(now);
+      date.setDate(date.getDate() + Number(relative[1]) * (relative[2].startsWith("week") ? 7 : 1));
+    }
+  }
+
+  if (!date) {
+    const weekdays = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    const weekday = dateExpression.match(/^(?:next )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/);
+    if (weekday) {
+      const target = weekdays.indexOf(weekday[1]);
+      let days = (target - now.getDay() + 7) % 7;
+      if (dateExpression.startsWith("next ")) days += 7;
+      else if (days === 0) days = 7;
+      date = new Date(now);
+      date.setDate(date.getDate() + days);
+    }
+  }
+
+  if (!date) {
+    const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    const calendar = dateExpression.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})$/);
+    if (calendar) {
+      const month = months.findIndex((name) => name.startsWith(calendar[1].slice(0, 3)));
+      const day = Number(calendar[2]);
+      if (month < 0 || day < 1 || day > 31) return null;
+      date = new Date(now.getFullYear(), month, day);
+      if (date.getMonth() !== month || date.getDate() !== day) return null;
+      if (withTime(date, timeHour, timeMinute) <= now) date.setFullYear(date.getFullYear() + 1);
+    }
+  }
+
+  if (!date) return null;
+  const dueAt = withTime(date, timeHour, timeMinute);
+  // "Today" is intentionally literal: never turn a missed time into a
+  // surprise tomorrow follow-up.
+  return dueAt > now ? dueAt : null;
+}
+
+function FollowUpPicker({ onSchedule, onClose, scheduling }: {
+  onSchedule: (dueAt: string) => void;
+  onClose: () => void;
+  scheduling: boolean;
+}) {
+  const [expression, setExpression] = useState("");
+  const parsedDueAt = useMemo(() => parseFollowUpTime(expression), [expression]);
+  const schedule = () => {
+    if (parsedDueAt && !scheduling) onSchedule(parsedDueAt.toISOString());
+  };
+  return <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[20vh] backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="w-full max-w-lg overflow-hidden rounded-xl bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Schedule follow-up">
+      <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
+        <CalendarClock size={16} className="flex-shrink-0 text-violet-500" />
+        <input
+          autoFocus
+          value={expression}
+          onChange={(event) => setExpression(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); schedule(); }
+            if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+          }}
+          placeholder="tomorrow at 2pm…"
+          className="flex-1 text-sm text-gray-800 outline-none placeholder:text-gray-400"
+        />
+        <button type="button" onClick={onClose} disabled={scheduling} className="text-gray-300 hover:text-gray-500" aria-label="Close follow-up scheduling"><X size={15} /></button>
+      </div>
+      <div className="px-4 py-3 text-sm">
+        {parsedDueAt ? <span className="text-violet-700">Schedules {parsedDueAt.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> : <span className="text-gray-400">Try “today 3am”, “tomorrow 2pm”, or “in 5 days”</span>}
+      </div>
+      <div className="flex gap-4 border-t border-gray-50 px-4 py-2 text-xs text-gray-400">
+        <span>↵ schedule</span><span>esc cancel</span>
+      </div>
+    </div>
+  </div>;
+}
+
+export default function EmailPreview({ email, reviewMode = false, followUpMode = false }: { email: string; reviewMode?: boolean; followUpMode?: boolean }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
@@ -314,6 +421,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
   const queryClient = useQueryClient();
   const { archiveThread: queueArchiveThread, deleteThread: queueDeleteThread } = useMailActions();
   const { markRead, markUnread: queueMarkUnread, setStarred } = useMailFlags();
+  const [followUpPickerOpen, setFollowUpPickerOpen] = useState(false);
 
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["messages", selectedThreadId],
@@ -328,6 +436,12 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     enabled: reviewMode,
   });
   const reviewItem = reviewQueue.find((item) => item.thread_id === selectedThreadId);
+  const { data: followUps = [] } = useQuery({
+    queryKey: ["follow_ups"],
+    queryFn: api.getFollowUps,
+    enabled: followUpMode,
+  });
+  const followUpItem = followUps.find((item) => item.thread_id === selectedThreadId);
 
   const { mutate: archive, isPending: archiving } = useMutation({
     mutationFn: (threadId: string) => queueArchiveThread(threadId),
@@ -369,6 +483,10 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       await api.recordReviewDecision(threadId, decision);
     },
     onSuccess: (_, { decision }) => {
+      // Review decisions remove this item from the current list. Choose its
+      // adjacent visible neighbour before that list refreshes, so focus never
+      // snaps back to the top of the queue.
+      if (decision === "keep") useAppStore.getState().selectNextOrPrev();
       void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       void queryClient.invalidateQueries({ queryKey: ["threads"] });
       addToast(decision === "archived" ? "Archive queued" : decision === "keep" ? "Kept in inbox" : "Marked for follow-up");
@@ -384,11 +502,44 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     onError: (err) => addToast(`Could not delete email: ${String(err)}`),
   });
 
+  const { mutate: scheduleFollowUp, isPending: schedulingFollowUp } = useMutation({
+    mutationFn: async ({ threadId, dueAt }: { threadId: string; dueAt: string }) => {
+      await api.scheduleFollowUp(threadId, dueAt);
+      await api.recordReviewDecision(threadId, "follow_up");
+    },
+    onSuccess: () => {
+      // Scheduling from Review moves this email to Follow-ups. Advance using
+      // the shared visible-list selection state before the Review query drops
+      // the scheduled item.
+      if (reviewMode) useAppStore.getState().selectNextOrPrev();
+      setFollowUpPickerOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
+      void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
+      addToast("Follow-up scheduled");
+    },
+    onError: (err) => addToast(`Could not schedule follow-up: ${String(err)}`),
+  });
+
+  const { mutate: completeFollowUp, isPending: completingFollowUp } = useMutation({
+    mutationFn: (threadId: string) => api.completeFollowUp(threadId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
+      addToast("Follow-up completed");
+    },
+    onError: (err) => addToast(`Could not complete follow-up: ${String(err)}`),
+  });
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const key = e.key.toLowerCase();
+      if (key === "f" && ((reviewMode && reviewItem) || (followUpMode && followUpItem))) {
+        e.preventDefault();
+        setFollowUpPickerOpen(true);
+        return;
+      }
       if (key === "i" && reviewMode && reviewItem && !savingReview) {
         e.preventDefault();
         recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
@@ -402,7 +553,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteThread, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
+  }, [deleteThread, followUpItem, followUpMode, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
 
   // Handle keyboard shortcuts forwarded from the email iframe via postMessage.
   // useHotkeys is bypassed because hotkeys-js checks keyCode which synthetic events lack.
@@ -420,6 +571,10 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
       if (key === "k") { selectPrevThread(); return; }
       if (key === "escape") { setSelectedThread(null); return; }
       if (!threadId) return;
+      if (key === "f" && ((reviewMode && reviewItem) || (followUpMode && followUpItem))) {
+        setFollowUpPickerOpen(true);
+        return;
+      }
       if (key === "i" && reviewMode && reviewItem && !savingReview) {
         recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
         return;
@@ -441,7 +596,7 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, markRead, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
+  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, followUpItem, followUpMode, markRead, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
 
   useEffect(() => {
     if (!selectedThreadId) return;
@@ -520,8 +675,8 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
             </div>
             <div className="flex items-center gap-2">
               <button
-                disabled={savingReview || deletingFromReview}
-                onClick={() => recordReview({ threadId: reviewItem.thread_id, decision: "follow_up" })}
+                disabled={savingReview || deletingFromReview || schedulingFollowUp}
+                onClick={() => setFollowUpPickerOpen(true)}
                 className="rounded-md px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-40"
               >
                 Follow up
@@ -550,6 +705,30 @@ export default function EmailPreview({ email, reviewMode = false }: { email: str
               </button>
             </div>
           </div>
+          {followUpPickerOpen && <FollowUpPicker
+            scheduling={schedulingFollowUp}
+            onClose={() => setFollowUpPickerOpen(false)}
+            onSchedule={(dueAt) => scheduleFollowUp({ threadId: reviewItem.thread_id, dueAt })}
+          />}
+        </div>
+      )}
+      {followUpMode && followUpItem && (
+        <div className="mx-6 mt-4 rounded-lg border border-violet-100 bg-violet-50/40 px-4 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-violet-500">Follow-up</p>
+              <p className="mt-1 text-sm font-medium text-violet-900">Due {new Date(followUpItem.due_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => setFollowUpPickerOpen(true)} className="rounded-md px-3 py-2 text-sm text-violet-700 hover:bg-violet-100 disabled:opacity-40">Reschedule</button>
+              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => completeFollowUp(followUpItem.thread_id)} className="rounded-md bg-violet-600 px-3 py-2 text-sm text-white hover:bg-violet-700 disabled:opacity-40">Complete</button>
+            </div>
+          </div>
+          {followUpPickerOpen && <FollowUpPicker
+            scheduling={schedulingFollowUp}
+            onClose={() => setFollowUpPickerOpen(false)}
+            onSchedule={(dueAt) => scheduleFollowUp({ threadId: followUpItem.thread_id, dueAt })}
+          />}
         </div>
       )}
       <AnalysisBanner threadId={selectedThreadId} />

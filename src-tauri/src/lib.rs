@@ -63,6 +63,9 @@ pub fn run() {
             agent::get_auto_analysis_pending_count,
             agent::get_review_queue,
             agent::record_review_decision,
+            agent::schedule_follow_up,
+            agent::complete_follow_up,
+            agent::get_follow_ups,
             agent::get_digest,
             agent::get_thread_analysis,
         ])

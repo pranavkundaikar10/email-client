@@ -4,7 +4,7 @@ import { useAppStore } from "../store";
 import { useMailActions } from "./useMailActions";
 import { useMailFlags } from "./useMailFlags";
 
-type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review";
+type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review" | "follow_ups";
 
 interface Options {
   onViewChange: (view: View) => void;
@@ -141,7 +141,7 @@ export function useKeyboardNav({
     setCommandPaletteOpen(true);
   }, { enableOnFormTags: true });
 
-  // G-sequences: G then I/R/S/A or 1/2/3 within 1 second
+  // G-sequences: G then I/R/F/S/A or 1/2/3 within 1 second
   useEffect(() => {
     let gPressed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -166,6 +166,7 @@ export function useKeyboardNav({
         e.stopImmediatePropagation();
         if (e.key === "i" || e.key === "I") { e.preventDefault(); onViewChange("inbox"); }
         else if (e.key === "r" || e.key === "R") { e.preventDefault(); onViewChange("review"); }
+        else if (e.key === "f" || e.key === "F") { e.preventDefault(); onViewChange("follow_ups"); }
         else if (e.key === "s" || e.key === "S") { e.preventDefault(); onViewChange("starred"); }
         else if (e.key === "a" || e.key === "A") { e.preventDefault(); onViewChange("archive"); }
         else if (e.key === "n" || e.key === "N") { e.preventDefault(); onViewChange("sent"); }

@@ -8,6 +8,19 @@ import { useAppStore } from "../../store";
 import { useMailActions } from "../../hooks/useMailActions";
 import { useMailFlags } from "../../hooks/useMailFlags";
 import { useVisibleThreadList } from "../../hooks/useVisibleThreadList";
+import type { FollowUpItem, ReviewItem } from "../../lib/api";
+
+type ReviewSidebarItem = ReviewItem | FollowUpItem;
+
+function dueLabel(dueAt: string) {
+  const due = new Date(dueAt);
+  const now = new Date();
+  if (due < now) {
+    const hours = Math.max(1, Math.floor((now.getTime() - due.getTime()) / 3_600_000));
+    return hours >= 24 ? `Overdue · ${Math.floor(hours / 24)}d` : `Overdue · ${hours}h`;
+  }
+  return `Due today · ${due.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
 
 export default function ReviewList() {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
@@ -30,18 +43,31 @@ export default function ReviewList() {
     queryFn: api.getAutoAnalysisPendingCount,
     refetchInterval: 60_000,
   });
+  const { data: followUps = [] } = useQuery({
+    queryKey: ["follow_ups"],
+    queryFn: api.getFollowUps,
+    refetchInterval: 60_000,
+  });
 
-  const [today, earlier] = useMemo(() => {
+  const [dueFollowUps, today, earlier] = useMemo(() => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
+    const endToday = new Date(startOfToday);
+    endToday.setDate(endToday.getDate() + 1);
+    const due = followUps
+      .filter((item) => new Date(item.due_at) < endToday)
+      .sort((a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime());
+    const dueIds = new Set(due.map((item) => item.thread_id));
+    const reviewItems = queue.filter((item) => !dueIds.has(item.thread_id));
     return [
-      queue.filter((item) => new Date(item.last_message_at) >= startOfToday),
-      queue.filter((item) => new Date(item.last_message_at) < startOfToday),
+      due,
+      reviewItems.filter((item) => new Date(item.last_message_at) >= startOfToday),
+      reviewItems.filter((item) => new Date(item.last_message_at) < startOfToday),
     ];
-  }, [queue]);
+  }, [followUps, queue]);
   // This is also the literal render order below, so J/K cannot jump between
   // groups based on the API's priority order.
-  const visibleReviewThreads = useMemo(() => [...today, ...earlier], [today, earlier]);
+  const visibleReviewThreads = useMemo(() => [...dueFollowUps, ...today, ...earlier], [dueFollowUps, today, earlier]);
   useVisibleThreadList(visibleReviewThreads);
 
   useEffect(() => {
@@ -49,7 +75,7 @@ export default function ReviewList() {
     if (selectedThreadId && !visibleReviewThreads.some((item) => item.thread_id === selectedThreadId)) {
       setSelectedThread(visibleReviewThreads[0]?.thread_id ?? null);
     }
-  }, [queue, visibleReviewThreads, selectedThreadId, setSelectedThread]);
+  }, [visibleReviewThreads, selectedThreadId, setSelectedThread]);
 
   // Match the Inbox list: keyboard navigation keeps the selected review item
   // visible as the selection moves beyond the current viewport.
@@ -71,7 +97,7 @@ export default function ReviewList() {
     catch (error) { addToast(`Could not queue delete: ${String(error)}`); }
   }
 
-  function renderItems(items: typeof queue) {
+  function renderItems(items: ReviewSidebarItem[], followUp = false) {
     return items.map((item) => <div
       key={item.thread_id}
       ref={(element) => {
@@ -82,7 +108,10 @@ export default function ReviewList() {
       thread={item}
       selected={item.thread_id === selectedThreadId}
       checked={checkedThreadIds.has(item.thread_id)}
-      importance={item.importance}
+      importance={"importance" in item ? item.importance : undefined}
+      footer={followUp && "due_at" in item
+        ? <p className="px-3 pb-2 text-[10px] font-medium text-violet-600">{dueLabel(item.due_at)}</p>
+        : undefined}
       onClick={() => setSelectedThread(item.thread_id)}
       onCheck={() => toggleThreadCheck(item.thread_id)}
       onStar={() => { void setStarred(item.thread_id, !item.starred); }}
@@ -90,7 +119,7 @@ export default function ReviewList() {
   }
 
   if (isLoading) return <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
-  if (queue.length === 0) {
+  if (visibleReviewThreads.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
       {pendingCount > 0 ? <>
         <LoaderCircle size={22} className="animate-spin text-violet-500" />
@@ -112,7 +141,7 @@ export default function ReviewList() {
     />
     <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{queue.length} to review</span>
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{visibleReviewThreads.length} to review</span>
         {pendingCount > 0 && <span
           className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-violet-500"
           title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
@@ -136,6 +165,10 @@ export default function ReviewList() {
       </div>
     </div>
     <div className="flex-1 overflow-y-auto">
+    {dueFollowUps.length > 0 && <>
+      <p className="border-b border-violet-100 bg-violet-50/50 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-violet-700">Due follow-ups · {dueFollowUps.length}</p>
+      {renderItems(dueFollowUps, true)}
+    </>}
     {today.length > 0 && <>
       <p className="border-b border-gray-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Today · {today.length}</p>
       {renderItems(today)}

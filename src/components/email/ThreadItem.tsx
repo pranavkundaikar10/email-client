@@ -1,4 +1,5 @@
 import { Star } from "lucide-react";
+import type { ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import type { Thread } from "../../lib/api";
 
@@ -7,6 +8,7 @@ interface Props {
   selected: boolean;
   checked: boolean;
   importance?: number;
+  footer?: ReactNode;
   onClick: () => void;
   onCheck: () => void;
   onStar: () => void;
@@ -36,7 +38,7 @@ function firstRecipient(toEmailsJson: string): string {
   }
 }
 
-export default function ThreadItem({ thread, selected, checked, importance, onClick, onCheck, onStar }: Props) {
+export default function ThreadItem({ thread, selected, checked, importance, footer, onClick, onCheck, onStar }: Props) {
   const unread = thread.unread && !selected;
   const isSentOrDraft = thread.folder === "sent" || thread.folder === "drafts";
   const senderLabel = isSentOrDraft
@@ -80,10 +82,11 @@ export default function ThreadItem({ thread, selected, checked, importance, onCl
       </div>
 
       {/* Thread content */}
-      <button
-        onClick={onClick}
-        className="flex-1 text-left pr-2 py-3 flex flex-col gap-0.5 min-w-0"
-      >
+      <div className="min-w-0 flex-1">
+        <button
+          onClick={onClick}
+          className="flex w-full flex-col gap-0.5 py-3 pr-2 text-left"
+        >
       <div className="flex items-center justify-between gap-2">
         <span
           className={cn(
@@ -118,7 +121,9 @@ export default function ThreadItem({ thread, selected, checked, importance, onCl
           {thread.subject || "(no subject)"}
         </span>
       </div>
-      </button>
+        </button>
+        {footer}
+      </div>
 
       {/* Star — right */}
       <div

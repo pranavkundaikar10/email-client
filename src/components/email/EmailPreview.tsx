@@ -439,7 +439,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   const { data: followUps = [] } = useQuery({
     queryKey: ["follow_ups"],
     queryFn: api.getFollowUps,
-    enabled: followUpMode,
+    enabled: followUpMode || reviewMode,
   });
   const followUpItem = followUps.find((item) => item.thread_id === selectedThreadId);
 
@@ -535,7 +535,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const key = e.key.toLowerCase();
-      if (key === "f" && ((reviewMode && reviewItem) || (followUpMode && followUpItem))) {
+      if (key === "f" && ((reviewMode && (reviewItem || followUpItem)) || (followUpMode && followUpItem))) {
         e.preventDefault();
         setFollowUpPickerOpen(true);
         return;
@@ -576,7 +576,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         return;
       }
       if (!threadId) return;
-      if (key === "f" && ((reviewMode && reviewItem) || (followUpMode && followUpItem))) {
+      if (key === "f" && ((reviewMode && (reviewItem || followUpItem)) || (followUpMode && followUpItem))) {
         setFollowUpPickerOpen(true);
         return;
       }
@@ -721,7 +721,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
           />}
         </div>
       )}
-      {followUpMode && followUpItem && (
+      {(followUpMode || reviewMode) && followUpItem && (
         <div className="mx-6 mt-4 rounded-lg border border-violet-100 bg-violet-50/40 px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div>

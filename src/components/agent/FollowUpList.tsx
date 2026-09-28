@@ -71,11 +71,11 @@ export default function FollowUpList() {
         thread={item}
         selected={item.thread_id === selectedThreadId}
         checked={checkedThreadIds.has(item.thread_id)}
+        footer={<p className="px-3 pb-2 text-[10px] font-medium text-violet-500">Due {dueLabel(item.due_at)}</p>}
         onClick={() => setSelectedThread(item.thread_id)}
         onCheck={() => toggleThreadCheck(item.thread_id)}
         onStar={() => { void setStarred(item.thread_id, !item.starred); }}
       />
-      <p className="-mt-1 border-b border-gray-50 px-3 pb-2 text-[10px] font-medium text-violet-500">Due {dueLabel(item.due_at)}</p>
     </div>);
   }
 

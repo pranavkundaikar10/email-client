@@ -121,11 +121,14 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     let cancelled = false;
     // Read a fresh startup snapshot rather than relying on whichever list
     // cache happened to render first during sync.
-    Promise.all([api.getReviewQueue(50, "priority"), api.getAutoAnalysisPendingCount()])
-      .then(([queue, pendingCount]) => {
+    Promise.all([api.getReviewQueue(50, "priority"), api.getAutoAnalysisPendingCount(), api.getFollowUps()])
+      .then(([queue, pendingCount, startupFollowUps]) => {
         if (cancelled || startupViewResolved.current) return;
         startupViewResolved.current = true;
-        if (queue.length === 0 && pendingCount === 0) setActiveView("inbox");
+        const endToday = new Date();
+        endToday.setHours(23, 59, 59, 999);
+        const hasDueFollowUp = startupFollowUps.some((item) => new Date(item.due_at) <= endToday);
+        if (queue.length === 0 && pendingCount === 0 && !hasDueFollowUp) setActiveView("inbox");
       })
       .catch(() => {
         // Keep Review as the safe default if the local status lookup fails.

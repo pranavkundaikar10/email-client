@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, Plus, Trash2, ChevronUp, ChevronDown, GripVertical, RefreshCw } from "lucide-react";
 import { api, type SplitRule, type ThinkingSettings } from "../../lib/api";
@@ -37,12 +37,14 @@ type SettingsSection = "ai" | "inbox";
 
 export default function SplitsSettings({ onClose }: Props) {
   const queryClient = useQueryClient();
-  const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [triagePreferences, setTriagePreferences] = useState<string | null>(null);
   const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSection>("ai");
+  const saveNoticeTimer = useRef<number | undefined>(undefined);
+  const skipNextSplitAutosave = useRef(false);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -186,62 +188,94 @@ export default function SplitsSettings({ onClose }: Props) {
     );
   }
 
-  // ── save ─────────────────────────────────────────────────────────────────
-
-  async function save() {
-    setSaving(true);
+  const runSave = useCallback(async (operation: () => Promise<void>) => {
+    if (saveNoticeTimer.current !== undefined) window.clearTimeout(saveNoticeTimer.current);
+    setSaveState("saving");
     setError(null);
     try {
-      if (selectedModel && selectedModel !== configuredModel) {
-        await api.setAiModel(selectedModel);
-      }
-      const normalizedPreferences = (triagePreferences ?? savedTriagePreferences).trim();
-      if (normalizedPreferences !== savedTriagePreferences) {
-        await api.setTriagePreferences(normalizedPreferences);
-      }
-      const effectiveThinkingSettings = thinkingSettings ?? savedThinkingSettings;
-      if (
-        effectiveThinkingSettings.manual !== savedThinkingSettings.manual ||
-        effectiveThinkingSettings.background !== savedThinkingSettings.background
-      ) {
-        await api.setThinkingSettings(effectiveThinkingSettings);
-      }
-      const existing = new Set(rawSplits.map((s) => s.id));
-      const kept = new Set(effective.map((s) => s.id));
+      await operation();
+      setSaveState("saved");
+      saveNoticeTimer.current = window.setTimeout(() => setSaveState("idle"), 1800);
+    } catch (caught) {
+      setError(String(caught));
+      setSaveState("error");
+    }
+  }, []);
 
-      // Delete removed splits
+  const persistSplits = useCallback(async (snapshot: LocalSplit[]) => {
+      const existing = new Set(rawSplits.map((s) => s.id));
+      const kept = new Set(snapshot.map((s) => s.id));
+
       for (const raw of rawSplits) {
         if (!kept.has(raw.id)) await api.deleteSplit(raw.id);
       }
 
-      // Create new / update existing
       const finalIds: string[] = [];
-      for (const s of effective) {
+      const persisted: LocalSplit[] = [];
+      for (const s of snapshot) {
         if (s.isNew || !existing.has(s.id)) {
           const created = await api.createSplit(s.name);
           await api.updateSplit(created.id, s.name, s.rules);
           finalIds.push(created.id);
+          persisted.push({ ...s, id: created.id, isNew: false });
         } else {
           await api.updateSplit(s.id, s.name, s.rules);
           finalIds.push(s.id);
+          persisted.push({ ...s, isNew: false });
         }
       }
 
       await api.reorderSplits(finalIds);
       await api.recategorizeThreads();
+      skipNextSplitAutosave.current = true;
+      setSplits(persisted);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["splits"] }),
+        queryClient.invalidateQueries({ queryKey: ["threads"] }),
+      ]);
+  }, [queryClient, rawSplits]);
 
-      queryClient.invalidateQueries({ queryKey: ["splits"] });
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-      queryClient.invalidateQueries({ queryKey: ["ai_model"] });
-      queryClient.invalidateQueries({ queryKey: ["triage_preferences"] });
-      queryClient.invalidateQueries({ queryKey: ["ai_thinking_settings"] });
-      setSplits(null);
-      onClose();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
+  // Freeform text and split edits save after the user pauses, rather than on
+  // every keystroke. Toggles and model selection below save immediately.
+  useEffect(() => {
+    if (triagePreferences === null || triagePreferences === savedTriagePreferences) return;
+    const timer = window.setTimeout(() => {
+      const preferences = triagePreferences.trim();
+      void runSave(async () => {
+        await api.setTriagePreferences(preferences);
+        setTriagePreferences(preferences);
+        queryClient.setQueryData(["triage_preferences"], preferences);
+      });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [queryClient, runSave, savedTriagePreferences, triagePreferences]);
+
+  useEffect(() => {
+    if (splits === null) return;
+    if (skipNextSplitAutosave.current) {
+      skipNextSplitAutosave.current = false;
+      return;
     }
+    const snapshot = splits;
+    const timer = window.setTimeout(() => { void runSave(() => persistSplits(snapshot)); }, 700);
+    return () => window.clearTimeout(timer);
+  }, [persistSplits, runSave, splits]);
+
+  function changeModel(model: string) {
+    setSelectedModel(model);
+    if (!model || model === configuredModel) return;
+    void runSave(async () => {
+      await api.setAiModel(model);
+      queryClient.setQueryData(["ai_model"], model);
+    });
+  }
+
+  function changeThinking(next: ThinkingSettings) {
+    setThinkingSettings(next);
+    void runSave(async () => {
+      await api.setThinkingSettings(next);
+      queryClient.setQueryData(["ai_thinking_settings"], next);
+    });
   }
 
   return (
@@ -249,7 +283,12 @@ export default function SplitsSettings({ onClose }: Props) {
       <div className="app-dialog flex h-[min(590px,76vh)] w-[min(840px,92vw)] flex-col overflow-hidden rounded-xl shadow-2xl">
         {/* Header */}
         <div className="app-dialog-header flex items-center justify-between border-b px-6 py-4">
-          <h2 className="text-sm font-semibold text-gray-900">Settings</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-gray-900">Settings</h2>
+            {saveState === "saving" && <span className="text-[11px] text-gray-400">Saving…</span>}
+            {saveState === "saved" && <span className="text-[11px] text-emerald-600">Saved</span>}
+            {saveState === "error" && <span className="text-[11px] text-red-600">Couldn’t save</span>}
+          </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X size={15} />
           </button>
@@ -257,7 +296,6 @@ export default function SplitsSettings({ onClose }: Props) {
 
         <div className="flex min-h-0 flex-1">
           <aside className="app-dialog-sidebar w-44 flex-shrink-0 border-r px-3 py-4">
-            <p className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Settings</p>
             <nav className="space-y-1" aria-label="Settings sections">
               {([
                 ["ai", "AI"],
@@ -295,20 +333,20 @@ export default function SplitsSettings({ onClose }: Props) {
                 <RefreshCw size={13} className={fetchingModels ? "animate-spin" : ""} />
               </button>
             </div>
-            <div className="mt-2 rounded-lg border border-gray-200 bg-white">
-              <div className="flex items-center justify-between gap-4 px-3 py-3">
+            <div className="mt-3">
+              <div className="px-3 py-3">
                 <div className="min-w-0">
                   <p className="text-xs font-medium text-gray-700">Local AI model</p>
                   <p className="mt-0.5 text-[11px] text-gray-400">Used for future analyses</p>
                 </div>
                 {ollamaError ? (
-                  <p className="max-w-56 text-right text-[11px] text-red-600">Could not reach Ollama</p>
+                  <p className="mt-2 text-[11px] text-red-600">Could not reach Ollama</p>
                 ) : (
                   <select
                     value={selectedModel ?? configuredModel ?? ""}
-                    onChange={(e) => setSelectedModel(e.target.value)}
+                    onChange={(e) => changeModel(e.target.value)}
                     disabled={ollamaModels.length === 0}
-                    className="app-control max-w-64 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 outline-none disabled:opacity-50"
+                    className="app-control mt-2 w-full max-w-80 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 outline-none disabled:opacity-50"
                   >
                     {ollamaModels.length === 0 ? (
                       <option value="">No local models found</option>
@@ -330,24 +368,24 @@ export default function SplitsSettings({ onClose }: Props) {
             <p className="mt-1 text-xs text-gray-500">
               Reasoning can improve difficult triage, but makes local analysis slower.
             </p>
-            <div className="mt-2 divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
+            <div className="mt-3 space-y-3">
               {([
                 ["manual", "Manual analysis", "Used when you choose Analyze for an email."],
                 ["background", "Review Queue", "Used for automatic Review Queue processing."],
               ] as const).map(([key, label, description]) => {
                 const effectiveThinkingSettings = thinkingSettings ?? savedThinkingSettings;
-                return <label key={key} className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5">
-                  <span>
-                    <span className="block text-xs font-medium text-gray-700">{label}</span>
-                    <span className="mt-0.5 block text-[11px] text-gray-400">{description}</span>
-                  </span>
+                return <label key={key} className="flex cursor-pointer items-start gap-2.5 py-1">
                   <input
                     type="checkbox"
                     checked={effectiveThinkingSettings[key]}
-                    onChange={(event) => setThinkingSettings({ ...effectiveThinkingSettings, [key]: event.target.checked })}
-                    className="h-4 w-4 accent-indigo-600"
+                    onChange={(event) => changeThinking({ ...effectiveThinkingSettings, [key]: event.target.checked })}
+                    className="mt-0.5 h-4 w-4 flex-shrink-0 accent-indigo-600"
                     aria-label={`${label} thinking mode`}
                   />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-gray-700">{label}</span>
+                    <span className="mt-0.5 block text-[11px] text-gray-400">{description}</span>
+                  </span>
                 </label>;
               })}
             </div>
@@ -376,9 +414,8 @@ export default function SplitsSettings({ onClose }: Props) {
               placeholder="Example: I’m targeting backend and platform engineering roles. Prioritize recruiter scheduling, assessments, interviews, visa questions, and deadlines."
               className="app-control mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300"
             />
-            <div className="mt-1.5 flex items-start justify-between gap-3 text-[10px] text-gray-400">
-              <span>Core JSON rules and attachment protection always remain enabled.</span>
-              <span className="flex-shrink-0">{(triagePreferences ?? savedTriagePreferences).length}/1000</span>
+            <div className="mt-1.5 text-right text-[10px] text-gray-400">
+              {(triagePreferences ?? savedTriagePreferences).length}/1000
             </div>
           </section>
           </div>}
@@ -499,29 +536,9 @@ export default function SplitsSettings({ onClose }: Props) {
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="app-dialog-footer flex items-center justify-between border-t px-6 py-4">
-          {error ? (
-            <p className="text-xs text-red-500 truncate">{error}</p>
-          ) : (
-            <span />
-          )}
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="button-secondary rounded-lg px-3 py-1.5 text-sm"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={save}
-              disabled={saving}
-              className="button-primary rounded-lg px-4 py-1.5 text-sm disabled:opacity-40"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-        </div>
+        {error && <div className="app-dialog-footer border-t px-6 py-3">
+          <p className="truncate text-xs text-red-600">{error} Changes remain here; edit again to retry.</p>
+        </div>}
       </div>
     </div>
   );

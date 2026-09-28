@@ -99,6 +99,11 @@ export interface OllamaModel {
   modified_at: string | null;
 }
 
+export interface AccountProfile {
+  email: string;
+  profile_picture: string | null;
+}
+
 export interface ThinkingSettings {
   manual: boolean;
   background: boolean;
@@ -122,6 +127,9 @@ export interface FollowUpItem extends Thread {
 
 export const api = {
   getAccounts: () => invoke<string[]>("get_accounts"),
+
+  getAccountProfile: (email: string) =>
+    invoke<AccountProfile>("get_account_profile", { email }),
 
   connectGoogleAccount: () => invoke<string>("connect_google_account"),
 

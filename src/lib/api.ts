@@ -123,6 +123,8 @@ export interface FollowUpItem extends Thread {
 export const api = {
   getAccounts: () => invoke<string[]>("get_accounts"),
 
+  connectGoogleAccount: () => invoke<string>("connect_google_account"),
+
   addAccount: (email: string, password: string) =>
     invoke<string>("add_account", { email, password }),
 
@@ -173,6 +175,12 @@ export const api = {
 
   syncDrafts: (email: string) =>
     invoke<number>("sync_drafts", { email }),
+
+  startInboxIdle: (email: string) =>
+    invoke<void>("start_inbox_idle", { email }),
+
+  stopInboxIdle: (email: string) =>
+    invoke<void>("stop_inbox_idle", { email }),
 
   fetchMessageBody: (email: string, messageId: string, force = false) =>
     invoke<Message>("fetch_message_body", { email, messageId, force }),

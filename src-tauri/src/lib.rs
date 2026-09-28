@@ -10,6 +10,7 @@ pub fn run() {
         .setup(|app| {
             let app_handle = app.handle().clone();
             let operation_worker = sync::MailOperationWorker::default();
+            let inbox_idle_worker = sync::InboxIdleWorker::default();
             let worker_for_startup = operation_worker.clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = db::migrate_legacy_app_data(&app_handle) {
@@ -20,16 +21,21 @@ pub fn run() {
                 let pool = db::init_db(&app_handle)
                     .await
                     .expect("failed to initialize database");
+                if let Err(error) = db::merge_legacy_app_data(&app_handle, &pool).await {
+                    eprintln!("Could not merge legacy application data: {error}");
+                }
                 app_handle.manage(pool.clone());
                 tauri::async_runtime::spawn(async move {
                     let _ = sync::process_mail_operations(&app_handle, &pool, &worker_for_startup).await;
                 });
             });
             app.manage(operation_worker);
+            app.manage(inbox_idle_worker);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             auth::add_account,
+            auth::connect_google_account,
             auth::get_accounts,
             auth::remove_account,
             db::get_threads,
@@ -42,6 +48,8 @@ pub fn run() {
             sync::sync_older,
             sync::sync_sent,
             sync::sync_drafts,
+            sync::start_inbox_idle,
+            sync::stop_inbox_idle,
             sync::fetch_message_body,
             sync::prefetch_thread_bodies,
             sync::archive_thread,

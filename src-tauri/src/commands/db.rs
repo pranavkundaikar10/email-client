@@ -91,6 +91,78 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
     Ok(pool)
 }
 
+/// Completes the identifier migration for installations where the renamed app
+/// already created a small fresh database before the legacy copy could run.
+/// The current database is backed up first, then legacy rows are added without
+/// replacing newer mail state. The old database is never modified.
+pub async fn merge_legacy_app_data(app: &AppHandle, pool: &SqlitePool) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let marker = data_dir.join("legacy-data-merged-v1");
+    if marker.exists() {
+        return Ok(());
+    }
+    let parent = data_dir
+        .parent()
+        .ok_or_else(|| "Could not determine the application data directory".to_string())?;
+    let legacy_db = parent.join(LEGACY_APP_IDENTIFIER).join("mail.db");
+    let current_db = data_dir.join("mail.db");
+    if !legacy_db.exists() || !current_db.exists() {
+        return Ok(());
+    }
+
+    let quote_sql_path = |path: &Path| path.to_string_lossy().replace('\'', "''");
+    let backup = data_dir.join("mail.before-legacy-merge.db");
+    let mut connection = pool.acquire().await.map_err(|e| e.to_string())?;
+
+    if !backup.exists() {
+        sqlx::query(&format!("VACUUM INTO '{}'", quote_sql_path(&backup)))
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| format!("Could not back up current mail data before migration: {e}"))?;
+    }
+
+    sqlx::query(&format!("ATTACH DATABASE '{}' AS legacy", quote_sql_path(&legacy_db)))
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| format!("Could not open legacy mail data: {e}"))?;
+
+    let merge_result = async {
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        for statement in [
+            "INSERT OR IGNORE INTO accounts (id, email, provider, synced_at) SELECT id, email, provider, synced_at FROM legacy.accounts",
+            "INSERT OR IGNORE INTO threads (id, account_id, subject, snippet, unread, starred, archived, snoozed_until, last_message_at, label_ids, category, folder) SELECT id, account_id, subject, snippet, unread, starred, archived, snoozed_until, last_message_at, label_ids, category, folder FROM legacy.threads",
+            "INSERT OR IGNORE INTO messages (id, thread_id, account_id, from_email, from_name, to_emails, cc_emails, subject, body_html, body_text, sent_at, unread, body_fetched, imap_uid, is_newsletter, has_attachments) SELECT id, thread_id, account_id, from_email, from_name, to_emails, cc_emails, subject, body_html, body_text, sent_at, unread, body_fetched, imap_uid, is_newsletter, has_attachments FROM legacy.messages",
+            "INSERT OR IGNORE INTO email_analysis (thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at, is_job_related, job_category, recommended_action) SELECT thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at, is_job_related, job_category, recommended_action FROM legacy.email_analysis",
+            "INSERT OR IGNORE INTO email_reviews (thread_id, decision, reviewed_at) SELECT thread_id, decision, reviewed_at FROM legacy.email_reviews",
+            "INSERT OR IGNORE INTO follow_ups (thread_id, due_at, status, created_at, updated_at) SELECT thread_id, due_at, status, created_at, updated_at FROM legacy.follow_ups",
+            // Splits and preferences are user-authored local configuration, so
+            // the legacy version should win over the fresh defaults.
+            "INSERT OR REPLACE INTO splits (id, name, position, rules) SELECT id, name, position, rules FROM legacy.splits",
+            "INSERT OR REPLACE INTO app_settings (key, value) SELECT key, value FROM legacy.app_settings",
+        ] {
+            sqlx::query(statement).execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        }
+        sqlx::query("COMMIT").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if merge_result.is_err() {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    }
+    let detach_result = sqlx::query("DETACH DATABASE legacy").execute(&mut *connection).await;
+    merge_result?;
+    detach_result.map_err(|e| e.to_string())?;
+
+    // Rebuild the external-content search index after importing threads.
+    sqlx::query("INSERT INTO threads_fts(threads_fts) VALUES('rebuild')")
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| e.to_string())?;
+    fs::write(&marker, "merged\n").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
 pub struct ThreadRow {
     pub id: String,

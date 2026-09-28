@@ -8,8 +8,8 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 
 ## What it does
 
-- Connects to Gmail over IMAP with a Gmail App Password.
-- Syncs inbox headers and fetches an email body when it needs to display or analyze it.
+- Connects to Gmail over IMAP using Google OAuth or a Gmail App Password.
+- Keeps one lightweight IMAP IDLE connection open for near-real-time inbox changes, with a 60-second sync fallback; it fetches an email body only when it needs to display or analyze it.
 - Supports archive, delete, star, search, replies, split inboxes, and keyboard navigation.
 - Runs local AI email triage through Ollama. The default model is `gemma4:e4b`.
 - Displays an AI summary, action items, importance score, severity, and deadline when available.
@@ -34,7 +34,7 @@ Linux releases are built for 64-bit Intel/AMD computers. Download the format tha
 - **`.AppImage`** for most Linux distributions. Mark it executable in its file properties, then open it.
 - **`.deb`** for Ubuntu, Debian, and compatible distributions. Open it with the system package installer.
 
-You still need [Ollama](https://ollama.com/) installed and running locally, plus a Gmail App Password. After installing Ollama, run `ollama pull gemma4:e4b` in Terminal (or install another supported local model and select it in Settings).
+You still need [Ollama](https://ollama.com/) installed and running locally. After installing Ollama, run `ollama pull gemma4:e4b` in Terminal (or install another supported local model and select it in Settings).
 
 ## Development prerequisites
 
@@ -70,7 +70,7 @@ Do **not** need to install Tauri globally. `npm install` installs the project-pi
 
 SQLite is embedded in the Rust application through `sqlx`; there is no database server to install, configure, or start. The app creates its local database and runs migrations automatically on first launch.
 
-You also need a Gmail account with IMAP access and a Gmail App Password.
+You also need a Gmail account with IMAP access. The app supports secure Google OAuth sign-in; a Gmail App Password remains available as a fallback.
 
 ## Run from a fresh clone
 
@@ -90,7 +90,13 @@ Do not use `npm run dev` to launch the desktop app. That command starts only Vit
 
 ## Connect a Gmail account
 
-This app currently uses Gmail IMAP plus an App Password; it does not support OAuth / “Sign in with Google.”
+Choose **Continue with Google** in the app to connect through the system browser. It uses OAuth with PKCE and stores the refresh token in the operating system credential store (macOS Keychain or the Linux Secret Service). The client ID is public by design; no client secret is embedded in the app.
+
+For the current testing release, the Google Cloud project is in testing mode. The project owner must add each tester's Gmail address under **Google Auth Platform → Audience → Test users** before that tester can authorize the app. Google testing-mode refresh tokens expire after about seven days, so testers may need to sign in again during this phase.
+
+For release builds, add `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` as **GitHub Actions secrets**. They are intentionally excluded from the repository. Local development reads the same values from the ignored `src-tauri/.env` file.
+
+If Google OAuth is unavailable for your account, you can still use an App Password:
 
 1. Enable 2-Step Verification on the Gmail account.
 2. Create a Google App Password from [Google Account → App Passwords](https://myaccount.google.com/apppasswords).
@@ -118,7 +124,8 @@ The model can be wrong. Treat its score, recommendation, and extracted deadline 
 ## Data and security notes
 
 - Mail metadata and fetched message bodies are stored in a local SQLite database in the app’s data directory.
-- Gmail App Passwords are stored locally in `credentials.json` with owner-only (`0600`) permissions on Unix. They are **not yet stored in the operating system keychain**.
+- OAuth refresh tokens are stored in the operating system credential store; short-lived access tokens remain only in memory.
+- Gmail App Passwords are stored locally in `credentials.json` with owner-only (`0600`) permissions on Unix. Prefer Google OAuth where possible.
 - The app communicates with Gmail for syncing, body retrieval, sending, and explicit mailbox actions such as archive/delete.
 - The AI feature uses a local Ollama endpoint by default. Do not change its endpoint to a remote service unless you are comfortable sending email content to that service.
 - External or inline email images may not render correctly yet. The app does not currently resolve all `cid:` inline-image references.
@@ -148,12 +155,12 @@ npm run tauri build
 | `cargo` is not found after installing Rust | Run `source "$HOME/.cargo/env"` or open a new terminal, then retry. |
 | A native compiler is missing | Install the Tauri system prerequisites for your operating system, then retry. |
 | Ollama model error or no models in Settings | Start Ollama, run `ollama pull gemma4:e4b`, then refresh **Settings → Local AI model**. |
-| Gmail login fails | Use a Google App Password, not the normal Gmail password, and confirm 2-Step Verification is enabled. |
+| Gmail login fails | Prefer **Continue with Google** and make sure your address is in the project's test-user list. For the fallback, use a Google App Password—not the normal Gmail password—and confirm 2-Step Verification is enabled. |
 
 ## Current limitations
 
 - Gmail only; IMAP settings are not configurable.
-- App Password authentication only; no OAuth.
+- Google OAuth currently supports the configured testing project only; public distribution will require completing Google's verification process for the Gmail scope.
 - No calendar integration, reminders, or automatic actions.
 - Review decisions are local to this app and are not synced back to Gmail.
 - The project does not yet include a license file. Add an explicit license before publishing or accepting contributions.

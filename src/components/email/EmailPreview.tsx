@@ -273,11 +273,7 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
         : "text-gray-500 bg-gray-100 ring-gray-200";
 
   return (
-    <div className={`mx-6 mt-4 mb-1 px-4 py-3 rounded-lg border ${
-      analysis.is_actionable
-        ? "bg-indigo-50/60 border-indigo-100"
-        : "bg-gray-50 border-gray-100"
-    }`}>
+    <div className="mx-6 mt-4 mb-1 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-500">
@@ -288,9 +284,7 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
               category={analysis.job_category}
             />
           </div>
-          <p className={`mt-1.5 text-sm font-medium leading-relaxed ${
-            analysis.is_actionable ? "text-indigo-800" : "text-gray-700"
-          }`}>
+          <p className="mt-1.5 text-sm font-medium leading-relaxed text-gray-800">
             {analysis.summary || (analysis.is_actionable ? "Action needed" : "No action needed")}
           </p>
         </div>
@@ -309,8 +303,8 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
       {items.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">
           {items.map((it, i) => (
-            <li key={i} className="text-sm text-gray-700 flex gap-1.5">
-              <span className="text-indigo-300">•</span>
+            <li key={i} className="flex gap-1.5 text-sm text-gray-700">
+              <span className="text-indigo-400">•</span>
               {it}
             </li>
           ))}
@@ -390,38 +384,129 @@ function parseFollowUpTime(expression: string): Date | null {
   return dueAt > now ? dueAt : null;
 }
 
+type FollowUpSuggestion = {
+  expression: string;
+  dueAt: Date;
+  label: string;
+};
+
+function formatFollowUpDueAt(dueAt: Date) {
+  return dueAt.toLocaleString([], {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+function followUpTone(dueAt: string) {
+  const due = new Date(dueAt);
+  const now = new Date();
+  if (due < now) {
+    return { panel: "border-red-100 bg-red-50/40", label: "text-red-600", text: "text-red-900", action: "text-red-700 hover:bg-red-100", button: "bg-red-600 hover:bg-red-700" };
+  }
+  const endToday = new Date(now);
+  endToday.setHours(24, 0, 0, 0);
+  if (due < endToday) {
+    return { panel: "border-amber-200 bg-amber-50/40", label: "text-amber-700", text: "text-amber-900", action: "text-amber-700 hover:bg-amber-100", button: "bg-amber-600 hover:bg-amber-700" };
+  }
+  return { panel: "border-gray-200 bg-white", label: "text-gray-500", text: "text-gray-800", action: "text-indigo-700 hover:bg-indigo-50", button: "bg-indigo-600 hover:bg-indigo-700" };
+}
+
+function getFollowUpSuggestions(expression: string): FollowUpSuggestion[] {
+  const parsed = parseFollowUpTime(expression);
+  const presets = [
+    ["tomorrow 9am", "Tomorrow morning"],
+    ["tomorrow 2pm", "Tomorrow afternoon"],
+    ["in 3 days", "In 3 days"],
+    ["in 1 week", "In one week"],
+    ["next monday 9am", "Next Monday morning"],
+  ] as const;
+  const queryTerms = expression
+    .toLowerCase()
+    .replace(/\bat\b/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const presetSuggestions = presets.flatMap(([preset, label]) => {
+    const dueAt = parseFollowUpTime(preset);
+    if (!dueAt) return [];
+    const searchable = `${preset} ${label}`.toLowerCase();
+    if (queryTerms.length > 0 && !queryTerms.every((term) => searchable.includes(term))) return [];
+    return [{ expression: preset, dueAt, label }];
+  });
+
+  if (!parsed || !expression.trim()) return presetSuggestions;
+  return [
+    { expression, dueAt: parsed, label: "Schedule" },
+    ...presetSuggestions.filter((suggestion) => suggestion.dueAt.getTime() !== parsed.getTime()),
+  ];
+}
+
 function FollowUpPicker({ onSchedule, onClose, scheduling }: {
   onSchedule: (dueAt: string) => void;
   onClose: () => void;
   scheduling: boolean;
 }) {
   const [expression, setExpression] = useState("");
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
   const parsedDueAt = useMemo(() => parseFollowUpTime(expression), [expression]);
-  const schedule = () => {
-    if (parsedDueAt && !scheduling) onSchedule(parsedDueAt.toISOString());
+  const suggestions = useMemo(() => getFollowUpSuggestions(expression), [expression]);
+  useEffect(() => setActiveSuggestion(0), [expression]);
+
+  const schedule = (dueAt = parsedDueAt ?? suggestions[activeSuggestion]?.dueAt) => {
+    if (dueAt && !scheduling) onSchedule(dueAt.toISOString());
   };
   return <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[20vh] backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="w-full max-w-lg overflow-hidden rounded-xl bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Schedule follow-up">
-      <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
-        <CalendarClock size={16} className="flex-shrink-0 text-violet-500" />
+    <div className="app-dialog w-full max-w-lg overflow-hidden rounded-xl shadow-2xl" role="dialog" aria-modal="true" aria-label="Schedule follow-up">
+      <div className="app-dialog-header flex items-center gap-3 border-b px-4 py-3">
+        <CalendarClock size={16} className="flex-shrink-0 text-indigo-500" />
         <input
           autoFocus
           value={expression}
           onChange={(event) => setExpression(event.target.value)}
           onKeyDown={(event) => {
+            if (event.key === "ArrowDown" && suggestions.length > 0) {
+              event.preventDefault();
+              setActiveSuggestion((index) => Math.min(index + 1, suggestions.length - 1));
+            }
+            if (event.key === "ArrowUp" && suggestions.length > 0) {
+              event.preventDefault();
+              setActiveSuggestion((index) => Math.max(index - 1, 0));
+            }
             if (event.key === "Enter") { event.preventDefault(); schedule(); }
             if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
           }}
           placeholder="tomorrow at 2pm…"
           className="flex-1 text-sm text-gray-800 outline-none placeholder:text-gray-400"
+          role="combobox"
+          aria-expanded={suggestions.length > 0}
+          aria-controls="follow-up-suggestions"
+          aria-activedescendant={suggestions[activeSuggestion] ? `follow-up-suggestion-${activeSuggestion}` : undefined}
         />
         <button type="button" onClick={onClose} disabled={scheduling} className="text-gray-300 hover:text-gray-500" aria-label="Close follow-up scheduling"><X size={15} /></button>
       </div>
+      {suggestions.length > 0 && <div id="follow-up-suggestions" role="listbox" className="border-b border-gray-50 px-2 py-2">
+        {suggestions.slice(0, 4).map((suggestion, index) => (
+          <button
+            key={`${suggestion.expression}-${suggestion.dueAt.toISOString()}`}
+            id={`follow-up-suggestion-${index}`}
+            type="button"
+            role="option"
+            aria-selected={index === activeSuggestion}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              setExpression(suggestion.expression);
+              setActiveSuggestion(index);
+            }}
+            className={`flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left text-sm ${index === activeSuggestion ? "bg-indigo-50 text-indigo-800" : "text-gray-600 hover:bg-gray-50"}`}
+          >
+            <span className="font-medium">{suggestion.label}</span>
+            <span className="text-xs text-gray-400">{formatFollowUpDueAt(suggestion.dueAt)}</span>
+          </button>
+        ))}
+      </div>}
       <div className="px-4 py-3 text-sm">
-        {parsedDueAt ? <span className="text-violet-700">Schedules {parsedDueAt.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> : <span className="text-gray-400">Try “today 3am”, “tomorrow 2pm”, or “in 5 days”</span>}
+        {parsedDueAt ? <span className="text-indigo-700">Schedules {formatFollowUpDueAt(parsedDueAt)}</span> : <span className="text-gray-400">Type naturally, or choose a suggestion</span>}
       </div>
-      <div className="flex gap-4 border-t border-gray-50 px-4 py-2 text-xs text-gray-400">
-        <span>↵ schedule</span><span>esc cancel</span>
+      <div className="app-dialog-footer flex gap-4 border-t px-4 py-2 text-xs text-gray-400">
+        <span>↑↓ choose</span><span>↵ schedule</span><span>esc cancel</span>
       </div>
     </div>
   </div>;
@@ -683,11 +768,12 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   }
 
   const subject = messages[0]?.subject || "(no subject)";
+  const activeFollowUpTone = followUpItem ? followUpTone(followUpItem.due_at) : null;
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-gray-50">
+    <div className="preview-surface flex min-w-0 flex-1 flex-col overflow-hidden">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-100 bg-white px-4 py-3 sm:px-6">
+      <div className="preview-toolbar flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3 sm:px-6">
         <h2 className="min-w-0 truncate text-sm font-semibold text-gray-900">{subject}</h2>
         <div className="flex shrink-0 items-center gap-1">
           <button
@@ -736,10 +822,10 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
 
       {/* AI-extracted action items, if this thread has been analyzed */}
       {reviewMode && reviewItem && (
-        <div className="mx-6 mt-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
+        <div className="mx-6 mt-4 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Review decision</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-500">AI recommendation</p>
               <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
                 {recommendationLabel(reviewItem.recommended_action)}
               </p>
@@ -748,7 +834,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
               <button
                 disabled={savingReview || deletingFromReview || schedulingFollowUp}
                 onClick={() => setFollowUpPickerOpen(true)}
-                className="rounded-md px-3 py-2 text-sm text-amber-700 hover:bg-amber-50 disabled:opacity-40"
+                className="rounded-md px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-40"
               >
                 Follow up
               </button>
@@ -783,16 +869,16 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
           />}
         </div>
       )}
-      {(followUpMode || reviewMode) && followUpItem && (
-        <div className="mx-6 mt-4 rounded-lg border border-violet-100 bg-violet-50/40 px-4 py-3">
+      {(followUpMode || reviewMode) && followUpItem && activeFollowUpTone && (
+        <div className={`mx-6 mt-4 rounded-lg border px-4 py-3 ${activeFollowUpTone.panel}`}>
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-violet-500">Follow-up</p>
-              <p className="mt-1 text-sm font-medium text-violet-900">Due {new Date(followUpItem.due_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+              <p className={`text-xs font-semibold uppercase tracking-wide ${activeFollowUpTone.label}`}>Follow-up</p>
+              <p className={`mt-1 text-sm font-medium ${activeFollowUpTone.text}`}>Due {new Date(followUpItem.due_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
             </div>
             <div className="flex items-center gap-2">
-              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => setFollowUpPickerOpen(true)} className="rounded-md px-3 py-2 text-sm text-violet-700 hover:bg-violet-100 disabled:opacity-40">Reschedule</button>
-              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => completeFollowUp(followUpItem.thread_id)} className="rounded-md bg-violet-600 px-3 py-2 text-sm text-white hover:bg-violet-700 disabled:opacity-40">Complete</button>
+              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => setFollowUpPickerOpen(true)} className={`rounded-md px-3 py-2 text-sm disabled:opacity-40 ${activeFollowUpTone.action}`}>Reschedule</button>
+              <button disabled={completingFollowUp || schedulingFollowUp} onClick={() => completeFollowUp(followUpItem.thread_id)} className={`rounded-md px-3 py-2 text-sm text-white disabled:opacity-40 ${activeFollowUpTone.button}`}>Complete</button>
             </div>
           </div>
           {followUpPickerOpen && <FollowUpPicker

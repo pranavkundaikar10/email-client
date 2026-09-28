@@ -22,6 +22,10 @@ function dueLabel(dueAt: string) {
   return `Due today · ${due.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
+function dueTone(dueAt: string) {
+  return new Date(dueAt) < new Date() ? "text-red-600" : "text-amber-700";
+}
+
 export default function ReviewList() {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
@@ -110,7 +114,7 @@ export default function ReviewList() {
       checked={checkedThreadIds.has(item.thread_id)}
       importance={"importance" in item ? item.importance : undefined}
       footer={followUp && "due_at" in item
-        ? <p className="px-3 pb-2 text-[10px] font-medium text-violet-600">{dueLabel(item.due_at)}</p>
+        ? <p className={`px-3 pb-2 text-[10px] font-medium ${dueTone(item.due_at)}`}>{dueLabel(item.due_at)}</p>
         : undefined}
       onClick={() => setSelectedThread(item.thread_id)}
       onCheck={() => toggleThreadCheck(item.thread_id)}
@@ -122,7 +126,7 @@ export default function ReviewList() {
   if (visibleReviewThreads.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
       {pendingCount > 0 ? <>
-        <LoaderCircle size={22} className="animate-spin text-violet-500" />
+        <LoaderCircle size={22} className="animate-spin text-indigo-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">Preparing {pendingCount} {pendingCount === 1 ? "email" : "emails"}</p>
       </> : <>
         <Check size={22} className="text-emerald-500" />
@@ -143,7 +147,7 @@ export default function ReviewList() {
       <div className="flex items-center gap-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{visibleReviewThreads.length} to review</span>
         {pendingCount > 0 && <span
-          className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-violet-500"
+          className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-indigo-500"
           title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
           aria-label={`${pendingCount} ${pendingCount === 1 ? "email" : "emails"} awaiting AI analysis`}
         >
@@ -166,7 +170,7 @@ export default function ReviewList() {
     </div>
     <div className="flex-1 overflow-y-auto">
     {dueFollowUps.length > 0 && <>
-      <p className="border-b border-violet-100 bg-violet-50/50 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-violet-700">Due follow-ups · {dueFollowUps.length}</p>
+      <p className={`border-b px-3 py-2 text-[10px] font-semibold uppercase tracking-wide ${dueFollowUps.some((item) => new Date(item.due_at) < new Date()) ? "border-red-100 bg-red-50/50 text-red-700" : "border-amber-200 bg-amber-50/50 text-amber-700"}`}>Due follow-ups · {dueFollowUps.length}</p>
       {renderItems(dueFollowUps, true)}
     </>}
     {today.length > 0 && <>

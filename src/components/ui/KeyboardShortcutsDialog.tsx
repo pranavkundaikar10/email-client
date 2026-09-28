@@ -53,8 +53,8 @@ export default function KeyboardShortcutsDialog({ onClose }: { onClose: () => vo
   }, [onClose]);
 
   return <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[16vh] backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="w-full max-w-lg overflow-hidden rounded-xl bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
-      <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
+    <div className="app-dialog w-full max-w-lg overflow-hidden rounded-xl shadow-2xl" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div className="app-dialog-header flex items-center gap-3 border-b px-4 py-3">
         <Keyboard size={16} className="text-indigo-500" />
         <h2 className="flex-1 text-sm font-medium text-gray-800">Keyboard shortcuts</h2>
         <button type="button" onClick={onClose} className="text-gray-300 hover:text-gray-500" aria-label="Close keyboard shortcuts"><X size={15} /></button>
@@ -70,7 +70,7 @@ export default function KeyboardShortcutsDialog({ onClose }: { onClose: () => vo
           </div>
         </section>)}
       </div>
-      <div className="border-t border-gray-50 px-4 py-2 text-xs text-gray-400">esc close</div>
+      <div className="app-dialog-footer border-t px-4 py-2 text-xs text-gray-400">esc close</div>
     </div>
   </div>;
 }

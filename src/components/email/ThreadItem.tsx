@@ -56,10 +56,10 @@ export default function ThreadItem({ thread, selected, checked, importance, foot
       className={cn(
         "group w-full flex border-b border-gray-100 transition-colors",
         selected
-          ? "bg-indigo-50 border-l-2 border-l-indigo-500"
+          ? "thread-item-selected border-l-2"
           : checked
-          ? "bg-indigo-50/40 border-l-2 border-l-indigo-300"
-          : "hover:bg-gray-50 border-l-2 border-l-transparent"
+          ? "thread-item-checked border-l-2"
+          : "thread-item-idle border-l-2 border-l-transparent"
       )}
     >
       {/* Checkbox — visible on hover or when checked */}
@@ -72,7 +72,7 @@ export default function ThreadItem({ thread, selected, checked, importance, foot
       >
         <div className={cn(
           "w-3.5 h-3.5 rounded border flex items-center justify-center transition-colors",
-          checked ? "bg-indigo-500 border-indigo-500" : "border-gray-300 bg-white"
+          checked ? "thread-check-checked" : "border-gray-300 bg-white"
         )}>
           {checked && (
             <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 10" fill="none">
@@ -111,7 +111,7 @@ export default function ThreadItem({ thread, selected, checked, importance, foot
         {/* Always reserve space for the dot to prevent layout shift */}
         <span className={cn(
           "w-1.5 h-1.5 rounded-full flex-shrink-0",
-          unread ? "bg-indigo-500" : "invisible"
+          unread ? "app-accent-dot" : "invisible"
         )} />
         <span
           className={cn(

@@ -13,6 +13,15 @@ function dueLabel(dueAt: string) {
   return new Date(dueAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+function dueTone(dueAt: string) {
+  const due = new Date(dueAt);
+  const now = new Date();
+  if (due < now) return "text-red-600";
+  const endToday = new Date(now);
+  endToday.setHours(24, 0, 0, 0);
+  return due < endToday ? "text-amber-700" : "text-gray-500";
+}
+
 export default function FollowUpList() {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
@@ -71,7 +80,7 @@ export default function FollowUpList() {
         thread={item}
         selected={item.thread_id === selectedThreadId}
         checked={checkedThreadIds.has(item.thread_id)}
-        footer={<p className="px-3 pb-2 text-[10px] font-medium text-violet-500">Due {dueLabel(item.due_at)}</p>}
+        footer={<p className={`px-3 pb-2 text-[10px] font-medium ${dueTone(item.due_at)}`}>Due {dueLabel(item.due_at)}</p>}
         onClick={() => setSelectedThread(item.thread_id)}
         onCheck={() => toggleThreadCheck(item.thread_id)}
         onStar={() => { void setStarred(item.thread_id, !item.starred); }}
@@ -89,12 +98,12 @@ export default function FollowUpList() {
   return <div className="flex flex-1 flex-col overflow-hidden">
     <BulkActionBar count={checkedThreadIds.size} onArchive={archiveSelected} onDelete={deleteSelected} onClear={clearChecked} />
     <div className="flex items-center gap-1.5 border-b border-gray-100 px-3 py-2">
-      <CalendarClock size={12} className="text-violet-500" />
+      <CalendarClock size={12} className="text-indigo-500" />
       <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{followUps.length} follow-up{followUps.length === 1 ? "" : "s"}</span>
     </div>
     <div className="flex-1 overflow-y-auto">
       {overdue.length > 0 && <><p className="border-b border-red-100 bg-red-50/40 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-red-500">Overdue · {overdue.length}</p>{render(overdue)}</>}
-      {today.length > 0 && <><p className="border-y border-amber-100 bg-amber-50/40 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-amber-600">Today · {today.length}</p>{render(today)}</>}
+      {today.length > 0 && <><p className="border-y border-amber-200 bg-amber-50/40 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-amber-600">Today · {today.length}</p>{render(today)}</>}
       {upcoming.length > 0 && <><p className="border-y border-gray-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Upcoming · {upcoming.length}</p>{render(upcoming)}</>}
     </div>
   </div>;

@@ -42,16 +42,16 @@ function SignOutDialog({ email, signingOut, onConfirm, onClose }: {
   }, [onClose, signingOut]);
 
   return <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[20vh] backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !signingOut) onClose(); }}>
-    <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Sign out">
-      <div className="border-b border-gray-100 px-5 py-4">
+    <div className="app-dialog w-full max-w-md overflow-hidden rounded-xl shadow-2xl" role="dialog" aria-modal="true" aria-label="Sign out">
+      <div className="app-dialog-header border-b px-5 py-4">
         <h2 className="text-sm font-semibold text-gray-900">Sign out of {email}?</h2>
         <p className="mt-1 text-sm leading-5 text-gray-500">Your locally synced email and AI data will stay on this device.</p>
       </div>
       <div className="flex justify-end gap-2 px-5 py-3">
-        <button type="button" onClick={onClose} disabled={signingOut} className="rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-40">Cancel</button>
+        <button type="button" onClick={onClose} disabled={signingOut} className="button-secondary rounded-lg px-3 py-1.5 text-sm disabled:opacity-40">Cancel</button>
         <button type="button" onClick={onConfirm} disabled={signingOut} className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-40">{signingOut ? "Signing out…" : "Sign out"}</button>
       </div>
-      <div className="border-t border-gray-50 px-5 py-2 text-xs text-gray-400">esc cancel</div>
+      <div className="app-dialog-footer border-t px-5 py-2 text-xs text-gray-400">esc cancel</div>
     </div>
   </div>;
 }
@@ -318,7 +318,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   }, [activeView, email]);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white">
+    <div className="app-shell flex h-screen w-screen overflow-hidden">
       <Sidebar
         activeView={activeView}
         onViewChange={changeView}
@@ -337,7 +337,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
         {/* Split tabs — spans full width above both panels */}
         {showTabs && (
-          <div className="flex-shrink-0 flex border-b border-gray-100">
+          <div className="app-tabs flex flex-shrink-0 border-b">
             {splitDefs.map((split, idx) => {
               const active = split.id === effectiveSplitId;
               return (
@@ -347,8 +347,8 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
                   title={`G ${idx + 1}`}
                   className={`relative px-6 py-2.5 text-sm font-medium whitespace-nowrap transition-colors flex items-center gap-1.5 ${
                     active
-                      ? "text-gray-900 after:absolute after:bottom-0 after:inset-x-0 after:h-0.5 after:bg-indigo-500"
-                      : "text-gray-400 hover:text-gray-600"
+                      ? "split-tab-active after:absolute after:bottom-0 after:inset-x-0 after:h-0.5"
+                      : "split-tab-idle"
                   }`}
                 >
                   {split.label}
@@ -367,7 +367,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         <div className="flex min-w-0 flex-1 overflow-hidden">
 
           {/* Thread list panel */}
-          <div className="w-72 flex flex-col border-r border-gray-100 flex-shrink-0">
+          <div className="thread-panel w-72 flex flex-shrink-0 flex-col border-r">
             <SearchBar
               value={searchQuery}
               onChange={setSearchQuery}

@@ -3,6 +3,30 @@
 :root {
   font-family: Inter, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* The default Tailwind light grays are too faint for compact desktop UI
+     text and borders on white. Keep the same hierarchy, with accessible
+     contrast and slightly more defined surface separation. */
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #e9eef4;
+  --color-gray-200: #d7e0ea;
+  --color-gray-300: #c2ceda;
+  --color-gray-400: #667085;
+  --color-gray-500: #526075;
+  --color-gray-600: #3f4c5f;
+  --color-gray-700: #303b4d;
+  --color-gray-800: #202939;
+  --color-gray-900: #172033;
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --surface-subtle: #fafbfc;
+  --border-subtle: #d7e0ea;
+  --text-strong: #172033;
+  --text-muted: #667085;
+  --primary: #4f46e5;
+  --primary-soft: #eef2ff;
+  --primary-hover: #4338ca;
+  --nav: #111827;
+  --nav-border: #1f2937;
 }
 
 * {
@@ -12,7 +36,41 @@
 body {
   margin: 0;
   overflow: hidden;
+  background: var(--canvas);
+  color: var(--text-strong);
 }
+
+/* Shared productivity-tool color roles. Feature-specific colors remain for
+   semantics (priority, success, warning, destructive actions), not layout. */
+.app-shell { background: var(--canvas); }
+.app-tabs, .thread-panel, .preview-toolbar { background: var(--surface); border-color: var(--border-subtle); }
+.preview-surface { background: var(--canvas); }
+.app-nav-rail { background: var(--nav); border-color: var(--nav-border); }
+.app-avatar, .nav-primary-active, .app-accent-dot { background: var(--primary); }
+.nav-primary-idle { color: #a5b4fc; }
+.nav-primary-idle:hover { background: rgb(79 70 229 / 0.16); color: #e0e7ff; }
+.nav-secondary-active { background: #374151; }
+.nav-secondary-idle { color: #8b95a7; }
+.nav-secondary-idle:hover { background: #1f2937; color: #d5dbe5; }
+.nav-utility { color: #6b7280; }
+.nav-utility:hover { background: #1f2937; color: #c7d2fe; }
+.split-tab-active { color: var(--text-strong); }
+.split-tab-active::after { background: var(--primary); }
+.split-tab-idle { color: var(--text-muted); }
+.split-tab-idle:hover { color: #3f4a5e; }
+.thread-item-selected { background: var(--primary-soft); border-left-color: var(--primary); }
+.thread-item-checked { background: #f5f7ff; border-left-color: #a5b4fc; }
+.thread-item-idle:hover { background: var(--surface-subtle); }
+.thread-check-checked { background: var(--primary); border-color: var(--primary); }
+.app-dialog { background: var(--surface); border: 1px solid var(--border-subtle); }
+.app-dialog-header, .app-dialog-footer { border-color: var(--border-subtle); }
+.app-dialog-sidebar { background: var(--surface-subtle); border-color: var(--border-subtle); }
+.app-dialog-nav-active { background: var(--surface); color: var(--text-strong); box-shadow: 0 0 0 1px var(--border-subtle), 0 1px 2px rgb(15 23 42 / 0.08); }
+.app-control:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgb(79 70 229 / 0.12); }
+.button-primary { background: var(--primary); color: white; }
+.button-primary:hover { background: var(--primary-hover); }
+.button-secondary { color: #4b5563; }
+.button-secondary:hover { background: var(--surface-subtle); color: var(--text-strong); }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(6px); }

@@ -179,6 +179,7 @@ pub struct ThreadRow {
     pub to_emails: String,
     pub category: String,
     pub folder: String,
+    pub analysis_importance: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
@@ -232,8 +233,10 @@ pub async fn get_threads(
             COALESCE(m.from_email, '') AS from_email,
             COALESCE(m.to_emails, '[]') AS to_emails,
             t.category,
-            t.folder
+            t.folder,
+            a.importance AS analysis_importance
         FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE {}
@@ -314,9 +317,11 @@ pub async fn search_threads(
             COALESCE(m.from_email, '') AS from_email,
             COALESCE(m.to_emails, '[]') AS to_emails,
             t.category,
-            t.folder
+            t.folder,
+            a.importance AS analysis_importance
         FROM threads_fts f
         JOIN threads t ON t.rowid = f.rowid
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE threads_fts MATCH ?

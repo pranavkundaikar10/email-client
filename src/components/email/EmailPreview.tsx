@@ -471,6 +471,9 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         queryClient.invalidateQueries({ queryKey: ["thread_analysis", selectedThreadId] }),
         queryClient.invalidateQueries({ queryKey: ["digest"] }),
         queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+        queryClient.invalidateQueries({ queryKey: ["threads"] }),
+        queryClient.invalidateQueries({ queryKey: ["follow_ups"] }),
+        queryClient.invalidateQueries({ queryKey: ["search"] }),
       ]);
       addToast("Email analyzed");
     },

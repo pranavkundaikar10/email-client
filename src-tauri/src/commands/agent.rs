@@ -108,6 +108,7 @@ pub struct FollowUpItem {
     pub from_email: String,
     pub to_emails: String,
     pub category: String,
+    pub analysis_importance: Option<i64>,
 }
 
 /// What we ask the model to return. `format: "json"` on the Ollama request
@@ -873,9 +874,11 @@ pub async fn get_follow_ups(
                COALESCE(m.from_name, '') AS from_name,
                COALESCE(m.from_email, '') AS from_email,
                COALESCE(m.to_emails, '[]') AS to_emails,
-               t.category
+               t.category,
+               a.importance AS analysis_importance
         FROM follow_ups f
         JOIN threads t ON t.id = f.thread_id
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         WHERE f.status = 'active' AND t.archived = 0

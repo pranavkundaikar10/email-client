@@ -44,10 +44,11 @@ export default function ThreadItem({ thread, selected, checked, importance, foot
   const senderLabel = isSentOrDraft
     ? `To: ${firstRecipient(thread.to_emails) || thread.to_emails}`
     : thread.from_name || thread.from_email;
-  const severity = importance === undefined ? null
-    : importance >= 5 ? { label: "Critical", style: "bg-red-100 text-red-700" }
-    : importance >= 4 ? { label: "High", style: "bg-amber-100 text-amber-700" }
-    : importance >= 3 ? { label: "Medium", style: "bg-blue-100 text-blue-700" }
+  const resolvedImportance = importance ?? thread.analysis_importance ?? undefined;
+  const severity = resolvedImportance === undefined ? null
+    : resolvedImportance >= 5 ? { label: "Critical", style: "bg-red-100 text-red-700" }
+    : resolvedImportance >= 4 ? { label: "High", style: "bg-amber-100 text-amber-700" }
+    : resolvedImportance >= 3 ? { label: "Medium", style: "bg-blue-100 text-blue-700" }
     : { label: "Low", style: "bg-gray-100 text-gray-500" };
 
   return (

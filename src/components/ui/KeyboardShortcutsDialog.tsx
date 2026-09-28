@@ -19,6 +19,7 @@ const sections = [
     title: "Email actions",
     rows: [
       ["C", "Compose"],
+      ["R", "Reply"],
       ["E", "Archive"],
       ["#", "Move to Gmail Trash"],
       ["S", "Star or unstar"],

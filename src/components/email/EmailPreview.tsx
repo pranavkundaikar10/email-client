@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, CalendarClock, MailOpen, Reply, Trash2, Sparkles, X } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -98,7 +98,7 @@ pre{max-width:100% !important;white-space:pre-wrap !important;overflow-wrap:anyw
     }
   });
   document.addEventListener('keydown',function(e){
-    if(/^[fijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'||e.key===' '){
+    if(/^[fijkresux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'||e.key===' '){
       if(e.key==='Tab')e.preventDefault();
       if(e.key===' ')e.preventDefault();
       window.parent.postMessage({type:'keydown',key:e.key,shiftKey:e.shiftKey},'*');
@@ -136,12 +136,17 @@ function formatFullDate(iso: string): string {
 }
 
 function MessageCard({
-  message, email, isLast,
+  message, email, isLast, replyOpen, onReplyOpen, onReplyClose, replyAnchorRef,
 }: {
-  message: Message; email: string; isLast: boolean;
+  message: Message;
+  email: string;
+  isLast: boolean;
+  replyOpen: boolean;
+  onReplyOpen: () => void;
+  onReplyClose: () => void;
+  replyAnchorRef?: { current: HTMLDivElement | null };
 }) {
   const queryClient = useQueryClient();
-  const [replyOpen, setReplyOpen] = useState(false);
 
   const { mutate: fetchBody, isPending, error: fetchError } = useMutation<Message, Error, boolean>({
     mutationFn: (force) => api.fetchMessageBody(email, message.id, force),
@@ -170,7 +175,7 @@ function MessageCard({
   })();
 
   return (
-    <div className="mb-3 min-w-0 overflow-hidden rounded-xl border border-gray-100">
+    <div ref={isLast ? replyAnchorRef : undefined} className="mb-3 min-w-0 overflow-hidden rounded-xl border border-gray-100">
       {/* Header */}
       <div className="bg-white px-4 py-4 sm:px-5">
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
@@ -213,11 +218,11 @@ function MessageCard({
             <ReplyComposer
               from={email}
               replyTo={message}
-              onClose={() => setReplyOpen(false)}
+              onClose={onReplyClose}
             />
           ) : (
             <button
-              onClick={() => setReplyOpen(true)}
+              onClick={onReplyOpen}
               className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors"
             >
               <Reply size={13} />
@@ -432,7 +437,9 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   const { archiveThread: queueArchiveThread, deleteThread: queueDeleteThread } = useMailActions();
   const { markRead, markUnread: queueMarkUnread, setStarred } = useMailFlags();
   const [followUpPickerOpen, setFollowUpPickerOpen] = useState(false);
+  const [replyOpen, setReplyOpen] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const replyAnchorRef = useRef<HTMLDivElement>(null);
 
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["messages", selectedThreadId],
@@ -544,6 +551,18 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     onError: (err) => addToast(`Could not complete follow-up: ${String(err)}`),
   });
 
+  const openReply = useCallback(() => {
+    if (messages.length === 0) return;
+    setReplyOpen(true);
+    requestAnimationFrame(() => {
+      replyAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    });
+  }, [messages.length]);
+
+  useEffect(() => {
+    setReplyOpen(false);
+  }, [selectedThreadId]);
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === " " && selectedThreadId && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -556,6 +575,11 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const key = e.key.toLowerCase();
+      if (key === "r" && selectedThreadId) {
+        e.preventDefault();
+        openReply();
+        return;
+      }
       if (key === "f" && ((reviewMode && (reviewItem || followUpItem)) || (followUpMode && followUpItem))) {
         e.preventDefault();
         setFollowUpPickerOpen(true);
@@ -574,7 +598,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteThread, followUpItem, followUpMode, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
+  }, [deleteThread, followUpItem, followUpMode, openReply, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
 
   // Handle keyboard shortcuts forwarded from the email iframe via postMessage.
   // useHotkeys is bypassed because hotkeys-js checks keyCode which synthetic events lack.
@@ -593,6 +617,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         return;
       }
 
+      if (key === "r") { openReply(); return; }
       if (key === "j") { selectNextThread(); return; }
       if (key === "k") { selectPrevThread(); return; }
       if (key === "escape") {
@@ -627,7 +652,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, followUpItem, followUpMode, markRead, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
+  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, followUpItem, followUpMode, markRead, openReply, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
 
   useEffect(() => {
     if (!selectedThreadId) return;
@@ -670,6 +695,14 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
           >
             <Sparkles size={14} />
             {analyzing ? "Analyzing…" : "Analyze"}
+          </button>
+          <button
+            onClick={openReply}
+            disabled={messages.length === 0}
+            title="Reply (R)"
+            className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
+          >
+            <Reply size={15} />
           </button>
           <button
             onClick={() => { if (selectedThreadId) markUnread(selectedThreadId); }}
@@ -776,6 +809,10 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
             message={msg}
             email={email}
             isLast={i === messages.length - 1}
+            replyOpen={i === messages.length - 1 && replyOpen}
+            onReplyOpen={openReply}
+            onReplyClose={() => setReplyOpen(false)}
+            replyAnchorRef={i === messages.length - 1 ? replyAnchorRef : undefined}
           />
         ))}
       </div>

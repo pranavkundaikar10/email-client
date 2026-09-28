@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useHotkeys } from "react-hotkeys-hook";
-import { Search, Inbox, Star, Archive, X, Layers, Send, FileEdit, SlidersHorizontal } from "lucide-react";
+import { Search, Inbox, Star, Archive, X, Layers, Send, FileEdit, SlidersHorizontal, Maximize2, Minimize2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api";
 import { useAppStore } from "../../store";
@@ -22,9 +22,11 @@ interface Props {
   splits?: { id: string; label: string }[];
   onSplitChange?: (id: string) => void;
   onSplitsSettings: () => void;
+  onToggleFullscreen: () => void;
+  isSimpleFullscreen: boolean;
 }
 
-export default function CommandPalette({ onViewChange, onClose, splits, onSplitChange, onSplitsSettings }: Props) {
+export default function CommandPalette({ onViewChange, onClose, splits, onSplitChange, onSplitsSettings, onToggleFullscreen, isSimpleFullscreen }: Props) {
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const { setSelectedThread } = useAppStore();
@@ -88,6 +90,13 @@ export default function CommandPalette({ onViewChange, onClose, splits, onSplitC
       label: "Settings",
       icon: SlidersHorizontal,
       onSelect: () => { onSplitsSettings(); onClose(); },
+    },
+    {
+      id: "toggle-fullscreen",
+      label: isSimpleFullscreen ? "Exit fullscreen" : "Enter fullscreen",
+      shortcut: "⌃ ⇧ F",
+      icon: isSimpleFullscreen ? Minimize2 : Maximize2,
+      onSelect: () => { onToggleFullscreen(); onClose(); },
     },
   ];
 

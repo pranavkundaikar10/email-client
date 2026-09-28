@@ -19,6 +19,7 @@ import { useKeyboardNav } from "./hooks/useKeyboardNav";
 import { useAppStore } from "./store";
 import { api } from "./lib/api";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "review" | "follow_ups";
 
@@ -68,6 +69,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [splitsOpen, setSplitsOpen] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [simpleFullscreen, setSimpleFullscreen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -75,6 +77,21 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const activeSplitId = useAppStore((s) => s.activeSplitId);
   const setActiveSplitId = useAppStore((s) => s.setActiveSplitId);
   const queryClient = useQueryClient();
+
+  const toggleSimpleFullscreen = useCallback(async () => {
+    const appWindow = getCurrentWindow();
+    if (await appWindow.isFullscreen()) {
+      addToast("Exit macOS fullscreen first, then use Control-Shift-F.");
+      return;
+    }
+    const next = !simpleFullscreen;
+    try {
+      await appWindow.setSimpleFullscreen(next);
+      setSimpleFullscreen(next);
+    } catch (error) {
+      addToast(`Could not change fullscreen: ${String(error)}`);
+    }
+  }, [addToast, simpleFullscreen]);
 
   useEffect(() => {
     const unlisten = listen<{ operation: string; error: string }>("mail-operation-failed", ({ payload }) => {
@@ -188,6 +205,14 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     activeSplitId: effectiveSplitId,
     splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen && !shortcutsOpen,
   });
+
+  // App-controlled fullscreen keeps Escape available for email actions. On
+  // macOS this deliberately uses Tauri's simple fullscreen mode instead of
+  // the green-button native fullscreen space.
+  useHotkeys("ctrl+shift+f", (event) => {
+    event.preventDefault();
+    void toggleSimpleFullscreen();
+  }, { enableOnFormTags: false });
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -383,6 +408,8 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           splits={splitDefs}
           onSplitChange={switchTab}
           onSplitsSettings={() => setSplitsOpen(true)}
+          onToggleFullscreen={() => { void toggleSimpleFullscreen(); }}
+          isSimpleFullscreen={simpleFullscreen}
         />
       )}
 

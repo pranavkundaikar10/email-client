@@ -57,14 +57,15 @@ function IsolatedHtml({ html }: { html: string }) {
 
   const safeHtml = useMemo(() => normalizeEmailHtml(html), [html]);
 
-  const srcdoc = `<!DOCTYPE html><html><head>
+  const srcdoc = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-html,body{margin:0;max-width:100%;overflow-wrap:anywhere}
-body{font-family:sans-serif;font-size:14px;color:#374151;word-break:break-word}
-table{max-width:100% !important}
+html,body{margin:0;width:100%;max-width:100%;overflow-wrap:anywhere}
+body{font-family:sans-serif;font-size:14px;color:#374151;word-break:break-word;min-width:0}
+table{max-width:100% !important;overflow-wrap:anywhere}
 table.fullWidth,.fullWidth{min-width:0 !important;max-width:100% !important;width:100% !important}
 td,th{min-width:0 !important;overflow-wrap:anywhere}
 img{max-width:100% !important;height:auto !important}
+pre{max-width:100% !important;white-space:pre-wrap !important;overflow-wrap:anywhere}
 </style>
 </head><body>${safeHtml}<script>(function(){
   function h(){
@@ -111,7 +112,7 @@ img{max-width:100% !important;height:auto !important}
       srcDoc={srcdoc}
       sandbox="allow-scripts"
       scrolling="no"
-      style={{ width: "100%", height, border: "none", display: "block", overflow: "hidden" }}
+      style={{ width: "100%", minWidth: 0, maxWidth: "100%", height, border: "none", display: "block", overflow: "hidden" }}
     />
   );
 }
@@ -169,25 +170,25 @@ function MessageCard({
   })();
 
   return (
-    <div className="border border-gray-100 rounded-xl mb-3 overflow-hidden">
+    <div className="mb-3 min-w-0 overflow-hidden rounded-xl border border-gray-100">
       {/* Header */}
-      <div className="px-5 py-4 bg-white">
-        <div className="flex items-start justify-between gap-4">
-          <div>
+      <div className="bg-white px-4 py-4 sm:px-5">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <div className="min-w-0">
             <p className="text-sm font-semibold text-gray-900">
               {message.from_name || message.from_email}
             </p>
-            <p className="text-xs text-gray-400 mt-0.5">{message.from_email}</p>
-            {toList && <p className="text-xs text-gray-400 mt-0.5">To: {toList}</p>}
+            <p className="mt-0.5 break-all text-xs text-gray-400">{message.from_email}</p>
+            {toList && <p className="mt-0.5 break-words text-xs text-gray-400">To: {toList}</p>}
           </div>
-          <span className="text-xs text-gray-400 flex-shrink-0 mt-0.5">
+          <span className="mt-0.5 shrink-0 text-xs text-gray-400">
             {formatFullDate(message.sent_at)}
           </span>
         </div>
       </div>
 
       {/* Body */}
-      <div className="px-5 py-4 bg-white border-t border-gray-50">
+      <div className="min-w-0 overflow-x-hidden border-t border-gray-50 bg-white px-4 py-4 sm:px-5">
         {fetchError ? (
           <p className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded">
             Failed to load: {String(fetchError)}
@@ -207,7 +208,7 @@ function MessageCard({
 
       {/* Reply button — only on last message */}
       {isLast && (
-        <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
+        <div className="border-t border-gray-100 bg-gray-50 px-4 py-3 sm:px-5">
           {replyOpen ? (
             <ReplyComposer
               from={email}
@@ -656,11 +657,11 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   const subject = messages[0]?.subject || "(no subject)";
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-gray-50">
+    <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-gray-50">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-gray-100 flex-shrink-0">
-        <h2 className="text-sm font-semibold text-gray-900 truncate">{subject}</h2>
-        <div className="flex items-center gap-1">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-100 bg-white px-4 py-3 sm:px-6">
+        <h2 className="min-w-0 truncate text-sm font-semibold text-gray-900">{subject}</h2>
+        <div className="flex shrink-0 items-center gap-1">
           <button
             onClick={() => { if (selectedThreadId) analyzeThread(selectedThreadId); }}
             disabled={analyzing || archiving || deleting}
@@ -768,7 +769,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       <AnalysisBanner threadId={selectedThreadId} />
 
       {/* Messages */}
-      <div ref={messageListRef} className="flex-1 overflow-y-auto px-6 py-5">
+      <div ref={messageListRef} className="min-w-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-5">
         {messages.map((msg, i) => (
           <MessageCard
             key={msg.id}

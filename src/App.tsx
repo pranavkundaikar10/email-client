@@ -308,7 +308,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       />
 
       {/* Right content: tabs on top, then thread list + email preview below */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
         {/* Split tabs — spans full width above both panels */}
         {showTabs && (
@@ -339,7 +339,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         )}
 
         {/* Thread list + email preview side by side */}
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex min-w-0 flex-1 overflow-hidden">
 
           {/* Thread list panel */}
           <div className="w-72 flex flex-col border-r border-gray-100 flex-shrink-0">

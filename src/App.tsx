@@ -116,6 +116,10 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryKey: ["account_profile", email],
     queryFn: () => api.getAccountProfile(email),
   });
+  const { data: aiAssistanceSettings = { enabled: false } } = useQuery({
+    queryKey: ["ai_assistance_settings"],
+    queryFn: api.getAiAssistanceSettings,
+  });
 
   const { data: unreadCounts = {} } = useQuery({
     queryKey: ["unread_counts"],
@@ -235,7 +239,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const processOneRecentEmail = useCallback(async () => {
     // Keep local inference deliberately low-impact: one email at a time,
     // never in parallel, and only for mail received today.
-    if (backgroundAnalysisRunning.current) return;
+    if (!aiAssistanceSettings.enabled || backgroundAnalysisRunning.current) return;
     backgroundAnalysisRunning.current = true;
     try {
       const [candidate] = await api.getAutoAnalysisCandidates(1);
@@ -255,7 +259,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     } finally {
       backgroundAnalysisRunning.current = false;
     }
-  }, [email, queryClient]);
+  }, [aiAssistanceSettings.enabled, email, queryClient]);
 
   // Both the periodic fallback and IMAP IDLE events use this single sync path.
   // It owns cache invalidation and keeps local LLM work serialized.
@@ -268,6 +272,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       await api.syncInbox(email);
       queryClient.invalidateQueries({ queryKey: ["threads"] });
       queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
       await processOneRecentEmail();
       queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });

@@ -80,6 +80,11 @@ export default function SplitsSettings({ onClose }: Props) {
     queryFn: api.getThinkingSettings,
   });
 
+  const { data: aiAssistanceSettings = { enabled: true } } = useQuery({
+    queryKey: ["ai_assistance_settings"],
+    queryFn: api.getAiAssistanceSettings,
+  });
+
   const {
     data: ollamaModels = [],
     error: ollamaError,
@@ -278,6 +283,18 @@ export default function SplitsSettings({ onClose }: Props) {
     });
   }
 
+  function changeAiAssistance(enabled: boolean) {
+    void runSave(async () => {
+      const next = { enabled };
+      await api.setAiAssistanceSettings(next);
+      queryClient.setQueryData(["ai_assistance_settings"], next);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] }),
+      ]);
+    });
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="app-dialog flex h-[min(590px,76vh)] w-[min(840px,92vw)] flex-col overflow-hidden rounded-xl shadow-2xl">
@@ -333,6 +350,19 @@ export default function SplitsSettings({ onClose }: Props) {
                 <RefreshCw size={13} className={fetchingModels ? "animate-spin" : ""} />
               </button>
             </div>
+            <label className="mt-3 flex cursor-pointer items-start gap-2.5 px-3 py-1">
+              <input
+                type="checkbox"
+                checked={aiAssistanceSettings.enabled}
+                onChange={(event) => changeAiAssistance(event.target.checked)}
+                className="mt-0.5 h-4 w-4 flex-shrink-0 accent-indigo-600"
+              />
+              <span>
+                <span className="block text-xs font-medium text-gray-700">AI assistance</span>
+                <span className="mt-0.5 block text-[11px] text-gray-400">Analyze email locally with Ollama.</span>
+              </span>
+            </label>
+            {aiAssistanceSettings.enabled ? <>
             <div className="mt-3">
               <div className="px-3 py-3">
                 <div className="min-w-0">
@@ -361,8 +391,6 @@ export default function SplitsSettings({ onClose }: Props) {
                 )}
               </div>
             </div>
-          </section>
-
           <section>
             <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Thinking mode</h3>
             <p className="mt-1 text-xs text-gray-500">
@@ -417,6 +445,8 @@ export default function SplitsSettings({ onClose }: Props) {
             <div className="mt-1.5 text-right text-[10px] text-gray-400">
               {(triagePreferences ?? savedTriagePreferences).length}/1000
             </div>
+          </section>
+          </> : <p className="px-3 text-xs text-gray-500">AI analysis is off. Your email continues to sync normally.</p>}
           </section>
           </div>}
 

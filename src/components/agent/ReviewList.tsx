@@ -42,10 +42,15 @@ export default function ReviewList() {
     queryFn: () => api.getReviewQueue(50, sort),
     refetchInterval: 60_000,
   });
+  const { data: aiAssistanceSettings = { enabled: true } } = useQuery({
+    queryKey: ["ai_assistance_settings"],
+    queryFn: api.getAiAssistanceSettings,
+  });
   const { data: pendingCount = 0 } = useQuery({
     queryKey: ["auto_analysis_pending_count"],
     queryFn: api.getAutoAnalysisPendingCount,
     refetchInterval: 60_000,
+    enabled: aiAssistanceSettings.enabled,
   });
   const { data: followUps = [] } = useQuery({
     queryKey: ["follow_ups"],
@@ -112,7 +117,7 @@ export default function ReviewList() {
       thread={item}
       selected={item.thread_id === selectedThreadId}
       checked={checkedThreadIds.has(item.thread_id)}
-      importance={"importance" in item ? item.importance : undefined}
+      importance={"analysis_available" in item && item.analysis_available ? item.importance : undefined}
       footer={followUp && "due_at" in item
         ? <p className={`px-3 pb-2 text-[10px] font-medium ${dueTone(item.due_at)}`}>{dueLabel(item.due_at)}</p>
         : undefined}
@@ -125,13 +130,13 @@ export default function ReviewList() {
   if (isLoading) return <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
   if (visibleReviewThreads.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-      {pendingCount > 0 ? <>
+      {aiAssistanceSettings.enabled && pendingCount > 0 ? <>
         <LoaderCircle size={22} className="animate-spin text-indigo-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">Preparing {pendingCount} {pendingCount === 1 ? "email" : "emails"}</p>
       </> : <>
         <Check size={22} className="text-emerald-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
-        <p className="mt-1 text-xs text-gray-400">New analyzed emails will appear here automatically.</p>
+        <p className="mt-1 text-xs text-gray-400">{aiAssistanceSettings.enabled ? "New analyzed emails will appear here automatically." : "New inbox emails will appear here for review."}</p>
       </>}
     </div>;
   }
@@ -146,7 +151,7 @@ export default function ReviewList() {
     <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
       <div className="flex items-center gap-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{visibleReviewThreads.length} to review</span>
-        {pendingCount > 0 && <span
+        {aiAssistanceSettings.enabled && pendingCount > 0 && <span
           className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-indigo-500"
           title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
           aria-label={`${pendingCount} ${pendingCount === 1 ? "email" : "emails"} awaiting AI analysis`}

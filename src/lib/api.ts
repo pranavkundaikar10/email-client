@@ -110,6 +110,10 @@ export interface ThinkingSettings {
   background: boolean;
 }
 
+export interface AiAssistanceSettings {
+  enabled: boolean;
+}
+
 export interface ReviewItem extends Thread {
   thread_id: string;
   importance: number;
@@ -119,6 +123,7 @@ export interface ReviewItem extends Thread {
   deadline: string | null;
   is_actionable: boolean;
   recommended_action: RecommendedAction;
+  analysis_available: boolean;
 }
 
 export interface FollowUpItem extends Thread {
@@ -231,6 +236,12 @@ export const api = {
 
   setAiModel: (model: string) =>
     invoke<void>("set_ai_model", { model }),
+
+  getAiAssistanceSettings: () =>
+    invoke<AiAssistanceSettings>("get_ai_assistance_settings"),
+
+  setAiAssistanceSettings: (settings: AiAssistanceSettings) =>
+    invoke<void>("set_ai_assistance_settings", { settings }),
 
   getTriagePreferences: () =>
     invoke<string>("get_triage_preferences"),

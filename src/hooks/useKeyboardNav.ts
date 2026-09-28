@@ -86,14 +86,23 @@ export function useKeyboardNav({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [deleteThreads]);
 
-  // S — star/unstar selected thread
-  useHotkeys("s", (e) => {
-    e.preventDefault();
-    if (!selectedThreadId) return;
-    const thread = useAppStore.getState().threads.find((t) => t.id === selectedThreadId);
-    if (!thread) return;
-    void setStarred(selectedThreadId, !thread.starred);
-  }, { enableOnFormTags: false });
+  // S — star/unstar selected thread. A native listener is reliable when the
+  // desktop WebView owns focus; G then S is consumed by the capture-phase
+  // navigation handler below before this bubble-phase action can run.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key.toLowerCase() !== "s") return;
+      const target = e.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
+      if (!selectedThreadId) return;
+      const thread = useAppStore.getState().threads.find((t) => t.id === selectedThreadId);
+      if (!thread) return;
+      e.preventDefault();
+      void setStarred(selectedThreadId, !thread.starred);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedThreadId, setStarred]);
 
   // U — mark read
   useHotkeys("u", (e) => {

@@ -222,6 +222,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
       queryClient.invalidateQueries({ queryKey: ["digest"] });
       queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
+      queryClient.invalidateQueries({ queryKey: ["search"] });
     } catch (err) {
       console.warn("Background email analysis skipped:", err);
     } finally {

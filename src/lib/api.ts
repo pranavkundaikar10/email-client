@@ -15,6 +15,7 @@ export interface Thread {
   to_emails: string;
   category: string;
   folder: string;
+  analysis_importance?: number | null;
 }
 
 export interface Message {

@@ -29,6 +29,14 @@ function normalizeEmailHtml(html: string): string {
   return document.body.innerHTML;
 }
 
+function scrollEmailContent(container: HTMLDivElement | null, direction: 1 | -1) {
+  if (!container) return;
+  // A near-page scroll preserves a little context, matching native reader
+  // behavior. Smooth scrolling also makes repeated Space presses legible.
+  const distance = Math.max(Math.round(container.clientHeight * 0.85), 240);
+  container.scrollBy({ top: direction * distance, behavior: "smooth" });
+}
+
 function IsolatedHtml({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(150);
@@ -89,8 +97,9 @@ img{max-width:100% !important;height:auto !important}
     }
   });
   document.addEventListener('keydown',function(e){
-    if(/^[fijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'){
+    if(/^[fijkesux#]$/i.test(e.key)||e.key==='Escape'||e.key==='Tab'||e.key===' '){
       if(e.key==='Tab')e.preventDefault();
+      if(e.key===' ')e.preventDefault();
       window.parent.postMessage({type:'keydown',key:e.key,shiftKey:e.shiftKey},'*');
     }
   });
@@ -422,6 +431,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   const { archiveThread: queueArchiveThread, deleteThread: queueDeleteThread } = useMailActions();
   const { markRead, markUnread: queueMarkUnread, setStarred } = useMailFlags();
   const [followUpPickerOpen, setFollowUpPickerOpen] = useState(false);
+  const messageListRef = useRef<HTMLDivElement>(null);
 
   const { data: messages = [], isLoading } = useQuery({
     queryKey: ["messages", selectedThreadId],
@@ -535,6 +545,13 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (e.key === " " && selectedThreadId && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const target = e.target;
+        if (target instanceof Element && target.closest("input, textarea, select, button, a, [contenteditable='true'], [role='dialog']")) return;
+        e.preventDefault();
+        scrollEmailContent(messageListRef.current, e.shiftKey ? -1 : 1);
+        return;
+      }
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const key = e.key.toLowerCase();
@@ -567,6 +584,11 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       const threadId = useAppStore.getState().selectedThreadId;
       if (key === "tab") {
         window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: Boolean(e.data.shiftKey), bubbles: true }));
+        return;
+      }
+
+      if (key === " ") {
+        scrollEmailContent(messageListRef.current, e.data.shiftKey ? -1 : 1);
         return;
       }
 
@@ -746,7 +768,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       <AnalysisBanner threadId={selectedThreadId} />
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-5">
+      <div ref={messageListRef} className="flex-1 overflow-y-auto px-6 py-5">
         {messages.map((msg, i) => (
           <MessageCard
             key={msg.id}

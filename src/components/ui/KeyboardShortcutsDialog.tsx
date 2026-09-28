@@ -6,6 +6,7 @@ const sections = [
     title: "Navigate",
     rows: [
       ["J / K", "Next / previous email"],
+      ["Space / Shift Space", "Scroll email down / up"],
       ["Tab / Shift Tab", "Next / previous split"],
       ["G I", "Inbox"],
       ["G R", "Review queue"],

@@ -11,6 +11,7 @@ interface Props {
   onSplits: () => void;
   onCompose: () => void;
   onDigest: () => void;
+  profilePicture: string | null;
   inboxUnread: number;
   followUpDueCount: number;
 }
@@ -24,14 +25,21 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
   { id: "search",  icon: Search,   label: "Search",   shortcut: "/"   },
 ];
 
-export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, inboxUnread, followUpDueCount }: Props) {
+export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, profilePicture, inboxUnread, followUpDueCount }: Props) {
   return (
     <aside className="w-14 flex flex-col items-center py-4 gap-1 bg-gray-950 border-r border-gray-800 flex-shrink-0">
       {/* Avatar */}
-      <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center mb-3">
+      <div className="relative w-8 h-8 overflow-hidden rounded-full bg-indigo-500 flex items-center justify-center mb-3">
         <span className="text-white text-xs font-semibold">
           {email[0]?.toUpperCase() ?? "?"}
         </span>
+        {profilePicture && <img
+          src={profilePicture}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={(event) => { event.currentTarget.style.display = "none"; }}
+          className="absolute inset-0 h-full w-full object-cover"
+        />}
       </div>
 
       {/* Review is the primary productivity workflow, ahead of compose. */}

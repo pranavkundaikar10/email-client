@@ -95,6 +95,10 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryKey: ["splits"],
     queryFn: api.getSplits,
   });
+  const { data: accountProfile } = useQuery({
+    queryKey: ["account_profile", email],
+    queryFn: () => api.getAccountProfile(email),
+  });
 
   const { data: unreadCounts = {} } = useQuery({
     queryKey: ["unread_counts"],
@@ -292,6 +296,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         onSplits={() => setSplitsOpen(true)}
         onCompose={() => setComposeOpen(true)}
         onDigest={() => setDigestOpen(true)}
+        profilePicture={accountProfile?.profile_picture ?? null}
         inboxUnread={Object.values(unreadCounts).reduce((a, b) => a + b, 0)}
         followUpDueCount={followUpDueCount}
       />

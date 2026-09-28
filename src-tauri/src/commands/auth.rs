@@ -47,6 +47,8 @@ struct StoredAccount {
     password: String,
     #[serde(default)]
     auth_kind: AuthKind,
+    #[serde(default)]
+    profile_picture: Option<String>,
 }
 
 #[derive(Clone)]
@@ -73,6 +75,13 @@ struct GoogleUserInfo {
     email: String,
     #[serde(default)]
     email_verified: bool,
+    picture: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AccountProfile {
+    email: String,
+    profile_picture: Option<String>,
 }
 
 struct GoogleOAuthClient {
@@ -264,7 +273,7 @@ pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, Str
         ("client_id", google_client.id.as_str()),
         ("redirect_uri", redirect_uri.as_str()),
         ("response_type", "code"),
-        ("scope", "openid email https://mail.google.com/"),
+        ("scope", "openid email profile https://mail.google.com/"),
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
         ("access_type", "offline"),
@@ -344,6 +353,7 @@ pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, Str
         email: user.email.clone(),
         password: String::new(),
         auth_kind: AuthKind::GoogleOAuth,
+        profile_picture: user.picture,
     });
     if let Err(error) = save_store(&app, &store) {
         let email = user.email.clone();
@@ -421,6 +431,19 @@ pub fn get_accounts(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+pub fn get_account_profile(app: tauri::AppHandle, email: String) -> Result<AccountProfile, String> {
+    let account = load_store(&app)?
+        .accounts
+        .into_iter()
+        .find(|account| account.email == email)
+        .ok_or_else(|| format!("No account found for {email}"))?;
+    Ok(AccountProfile {
+        email: account.email,
+        profile_picture: account.profile_picture,
+    })
+}
+
+#[tauri::command]
 pub async fn add_account(
     app: tauri::AppHandle,
     email: String,
@@ -434,6 +457,7 @@ pub async fn add_account(
         email: email.clone(),
         password,
         auth_kind: AuthKind::AppPassword,
+        profile_picture: None,
     });
     save_store(&app, &store)?;
     Ok(email)

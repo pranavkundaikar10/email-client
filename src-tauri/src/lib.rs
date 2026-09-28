@@ -37,6 +37,7 @@ pub fn run() {
             auth::add_account,
             auth::connect_google_account,
             auth::get_accounts,
+            auth::get_account_profile,
             auth::remove_account,
             db::get_threads,
             db::get_messages,

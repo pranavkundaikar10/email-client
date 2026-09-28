@@ -45,6 +45,9 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - run: npm ci
       - run: npm run tauri -- build --target ${{ matrix.target }}
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v4
         with:
           name: productive-email-macos-${{ matrix.arch }}
@@ -76,6 +79,9 @@ jobs:
             librsvg2-dev
       - run: npm ci
       - run: npm run tauri -- build --bundles appimage,deb
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v4
         with:
           name: productive-email-linux-x86_64

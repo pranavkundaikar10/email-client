@@ -1,6 +1,6 @@
 use lettre::{
     message::{header::ContentType, Mailbox, MultiPart, SinglePart},
-    transport::smtp::authentication::Credentials,
+    transport::smtp::authentication::{Credentials, Mechanism},
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub async fn send_email(
     app: tauri::AppHandle,
     req: SendRequest,
 ) -> Result<SendResult, String> {
-    let password = crate::commands::auth::load_password(&app, &req.from)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &req.from).await?;
 
     let from_mailbox: Mailbox = req.from.parse().map_err(|e: lettre::address::AddressError| e.to_string())?;
 
@@ -73,11 +73,14 @@ pub async fn send_email(
         )
         .map_err(|e| e.to_string())?;
 
-    let creds = Credentials::new(req.from.clone(), password);
-
+    let (secret, mechanism) = match auth {
+        crate::commands::auth::GmailAuth::AppPassword(password) => (password, Mechanism::Plain),
+        crate::commands::auth::GmailAuth::OAuthAccessToken(token) => (token, Mechanism::Xoauth2),
+    };
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(GMAIL_SMTP_HOST)
         .map_err(|e| e.to_string())?
-        .credentials(creds)
+        .credentials(Credentials::new(req.from.clone(), secret))
+        .authentication(vec![mechanism])
         .build();
 
     mailer.send(email).await.map_err(|e| e.to_string())?;

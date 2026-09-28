@@ -1,5 +1,5 @@
 import "./App.css";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useHotkeys } from "react-hotkeys-hook";
 import AccountSetup from "./pages/AccountSetup";
@@ -24,6 +24,37 @@ type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "re
 
 const ACCOUNT_KEY = "connected_email";
 
+function SignOutDialog({ email, signingOut, onConfirm, onClose }: {
+  email: string;
+  signingOut: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || signingOut) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, signingOut]);
+
+  return <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[20vh] backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !signingOut) onClose(); }}>
+    <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl" role="dialog" aria-modal="true" aria-label="Sign out">
+      <div className="border-b border-gray-100 px-5 py-4">
+        <h2 className="text-sm font-semibold text-gray-900">Sign out of {email}?</h2>
+        <p className="mt-1 text-sm leading-5 text-gray-500">Your locally synced email and AI data will stay on this device.</p>
+      </div>
+      <div className="flex justify-end gap-2 px-5 py-3">
+        <button type="button" onClick={onClose} disabled={signingOut} className="rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-40">Cancel</button>
+        <button type="button" onClick={onConfirm} disabled={signingOut} className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-700 disabled:opacity-40">{signingOut ? "Signing out…" : "Sign out"}</button>
+      </div>
+      <div className="border-t border-gray-50 px-5 py-2 text-xs text-gray-400">esc cancel</div>
+    </div>
+  </div>;
+}
+
 function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) {
   const [activeView, setActiveView] = useState<View>("review");
   const [initialSyncComplete, setInitialSyncComplete] = useState(false);
@@ -31,6 +62,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const [, setSyncing] = useState(false);
   const syncedFolders = useRef(new Set<string>());
   const backgroundAnalysisRunning = useRef(false);
+  const inboxSyncInProgress = useRef(false);
   const addToast = useAppStore((s) => s.addToast);
   const [composeOpen, setComposeOpen] = useState(false);
   const [splitsOpen, setSplitsOpen] = useState(false);
@@ -168,56 +200,74 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     setComposeOpen(true);
   }, { enableOnFormTags: false });
 
+  const processOneRecentEmail = useCallback(async () => {
+    // Keep local inference deliberately low-impact: one email at a time,
+    // never in parallel, and only for mail received today.
+    if (backgroundAnalysisRunning.current) return;
+    backgroundAnalysisRunning.current = true;
+    try {
+      const [candidate] = await api.getAutoAnalysisCandidates(1);
+      if (!candidate) return;
+
+      // BODY.PEEK fetches the content without changing Gmail's read state.
+      await api.fetchMessageBody(email, candidate.message_id);
+      await api.analyzeThread(candidate.thread_id, undefined, undefined, "background");
+      queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
+      queryClient.invalidateQueries({ queryKey: ["digest"] });
+      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+    } catch (err) {
+      console.warn("Background email analysis skipped:", err);
+    } finally {
+      backgroundAnalysisRunning.current = false;
+    }
+  }, [email, queryClient]);
+
+  // Both the periodic fallback and IMAP IDLE events use this single sync path.
+  // It owns cache invalidation and keeps local LLM work serialized.
+  const syncInbox = useCallback(async () => {
+    if (inboxSyncInProgress.current) return;
+    inboxSyncInProgress.current = true;
+    setSyncing(true);
+    try {
+      await api.processPendingMailOperations();
+      await api.syncInbox(email);
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
+      queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+      queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
+      await processOneRecentEmail();
+      queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
+    } catch (err) {
+      addToast(`Sync failed: ${String(err)}`);
+    } finally {
+      inboxSyncInProgress.current = false;
+      setSyncing(false);
+      setInitialSyncComplete(true);
+    }
+  }, [addToast, email, processOneRecentEmail, queryClient]);
+
   useEffect(() => {
-    async function processOneRecentEmail() {
-      // Keep local inference deliberately low-impact: one email per sync
-      // cycle, never in parallel, and only for mail received today.
-      if (backgroundAnalysisRunning.current) return;
-      backgroundAnalysisRunning.current = true;
-      try {
-        const [candidate] = await api.getAutoAnalysisCandidates(1);
-        if (!candidate) return;
-
-        // BODY.PEEK fetches the content without changing Gmail's read state.
-        await api.fetchMessageBody(email, candidate.message_id);
-        await api.analyzeThread(candidate.thread_id, undefined, undefined, "background");
-        queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
-        queryClient.invalidateQueries({ queryKey: ["digest"] });
-        // The pending indicator and Review list must transition together once
-        // the persisted analysis makes this thread eligible for review.
-        queryClient.invalidateQueries({ queryKey: ["review_queue"] });
-      } catch (err) {
-        // Background triage is opportunistic. Manual Analyze remains available
-        // and avoids interrupting the user with repeated transient errors.
-        console.warn("Background email analysis skipped:", err);
-      } finally {
-        backgroundAnalysisRunning.current = false;
-      }
-    }
-
-    async function sync() {
-      setSyncing(true);
-      try {
-        // Drains one durable Gmail archive/delete operation. This is tiny
-        // when the queue is empty and provides retry after app restarts.
-        await api.processPendingMailOperations();
-        await api.syncInbox(email);
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
-        queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
-        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
-        await processOneRecentEmail();
-        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
-      } catch (err) {
-        addToast(`Sync failed: ${String(err)}`);
-      } finally {
-        setSyncing(false);
-        setInitialSyncComplete(true);
-      }
-    }
-    sync();
-    const interval = setInterval(sync, 60_000);
+    void syncInbox();
+    const interval = setInterval(() => { void syncInbox(); }, 60_000);
     return () => clearInterval(interval);
+  }, [syncInbox]);
+
+  useEffect(() => {
+    void api.startInboxIdle(email).catch((error) => console.warn("Could not start IMAP IDLE:", error));
+    return () => { void api.stopInboxIdle(email); };
   }, [email]);
+
+  useEffect(() => {
+    let debounce: number | undefined;
+    const unlisten = listen<string>("inbox-idle-changed", ({ payload }) => {
+      if (payload !== email) return;
+      if (debounce !== undefined) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => { void syncInbox(); }, 1200);
+    });
+    return () => {
+      if (debounce !== undefined) window.clearTimeout(debounce);
+      void unlisten.then((dispose) => dispose());
+    };
+  }, [email, syncInbox]);
 
   // Lazy sync for sent/drafts — fire once per session when the view is first visited
   useEffect(() => {
@@ -334,6 +384,8 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
 export default function App() {
   const [email, setEmail] = useState<string | null | undefined>(undefined);
+  const [signOutOpen, setSignOutOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     const savedEmail = localStorage.getItem(ACCOUNT_KEY);
@@ -369,11 +421,7 @@ export default function App() {
 
   async function handleLogout() {
     if (!email) return;
-    const confirmed = window.confirm(
-      `Sign out of ${email}?\n\nYour locally synced email and AI data will stay on this device.`,
-    );
-    if (!confirmed) return;
-
+    setSigningOut(true);
     try {
       // Signing out must remove the stored credential as well; otherwise the
       // next launch would silently restore the account from local storage.
@@ -381,13 +429,24 @@ export default function App() {
     } catch (error) {
       console.error("Could not remove the stored account:", error);
       window.alert("Could not sign out. Please try again.");
+      setSigningOut(false);
       return;
     }
     localStorage.removeItem(ACCOUNT_KEY);
     setEmail(null);
+    setSignOutOpen(false);
+    setSigningOut(false);
   }
 
   if (email === undefined) return null;
   if (!email) return <AccountSetup onConnected={handleConnected} />;
-  return <InboxApp email={email} onLogout={handleLogout} />;
+  return <>
+    <InboxApp email={email} onLogout={() => setSignOutOpen(true)} />
+    {signOutOpen && <SignOutDialog
+      email={email}
+      signingOut={signingOut}
+      onConfirm={() => { void handleLogout(); }}
+      onClose={() => setSignOutOpen(false)}
+    />}
+  </>;
 }

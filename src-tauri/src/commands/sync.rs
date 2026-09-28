@@ -2,15 +2,17 @@ use imap::Session;
 use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use chrono::Utc;
 use chrono::NaiveDateTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use serde::Serialize;
 use tauri::Emitter;
+use crate::commands::auth::GmailAuth;
 
 type ImapSession = Session<native_tls::TlsStream<TcpStream>>;
 
@@ -28,6 +30,43 @@ const OPERATION_UNDO_WINDOW_SECONDS: i64 = 8;
 #[derive(Clone, Default)]
 pub struct MailOperationWorker {
     lock: Arc<Mutex<()>>,
+}
+
+/// Owns one read-only IMAP IDLE listener for each active account. The listener
+/// only emits a local event; the normal incremental sync remains the single
+/// path that changes the local cache and starts background triage.
+#[derive(Clone, Default)]
+pub struct InboxIdleWorker {
+    active_accounts: Arc<StdMutex<HashSet<String>>>,
+}
+
+impl InboxIdleWorker {
+    fn start(&self, app: tauri::AppHandle, email: String) {
+        let mut active = match self.active_accounts.lock() {
+            Ok(active) => active,
+            Err(_) => return,
+        };
+        if !active.insert(email.clone()) {
+            return;
+        }
+        drop(active);
+
+        let worker = self.clone();
+        std::thread::spawn(move || run_inbox_idle_listener(app, email, worker));
+    }
+
+    fn stop(&self, email: &str) {
+        if let Ok(mut active) = self.active_accounts.lock() {
+            active.remove(email);
+        }
+    }
+
+    fn is_active(&self, email: &str) -> bool {
+        self.active_accounts
+            .lock()
+            .map(|active| active.contains(email))
+            .unwrap_or(false)
+    }
 }
 
 struct MessageMeta {
@@ -63,35 +102,104 @@ fn is_newsletter(headers: &mailparse::ParsedMail) -> bool {
     false
 }
 
-fn connect(email: &str, password: &str) -> Result<ImapSession, String> {
+fn connect(email: &str, auth: &GmailAuth) -> Result<ImapSession, String> {
     let tls = TlsConnector::new().map_err(|e| e.to_string())?;
     let client =
         imap::connect((GMAIL_IMAP_HOST, GMAIL_IMAP_PORT), GMAIL_IMAP_HOST, &tls)
             .map_err(|e| e.to_string())?;
-    client
-        .login(email, password)
-        .map_err(|(e, _)| e.to_string())
+    match auth {
+        GmailAuth::AppPassword(password) => client.login(email, password).map_err(|(e, _)| e.to_string()),
+        GmailAuth::OAuthAccessToken(token) => {
+            struct XOAuth2<'a> { email: &'a str, token: &'a str }
+            impl imap::Authenticator for XOAuth2<'_> {
+                type Response = Vec<u8>;
+                fn process(&self, _challenge: &[u8]) -> Self::Response {
+                    format!("user={}\x01auth=Bearer {}\x01\x01", self.email, self.token).into_bytes()
+                }
+            }
+            let xoauth2 = XOAuth2 { email, token };
+            client.authenticate("XOAUTH2", &xoauth2).map_err(|(e, _)| e.to_string())
+        }
+    }
 }
 
-pub async fn test_imap_connection(email: &str, password: &str) -> Result<(), String> {
+pub async fn test_imap_connection(email: &str, auth: &GmailAuth) -> Result<(), String> {
     let email = email.to_string();
-    let password = password.to_string();
+    let auth = auth.clone();
     tokio::task::spawn_blocking(move || {
-        let mut session = connect(&email, &password)?;
+        let mut session = connect(&email, &auth)?;
         session.logout().map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub fn start_inbox_idle(
+    app: tauri::AppHandle,
+    worker: tauri::State<'_, InboxIdleWorker>,
+    email: String,
+) {
+    worker.start(app, email);
+}
+
+#[tauri::command]
+pub fn stop_inbox_idle(worker: tauri::State<'_, InboxIdleWorker>, email: String) {
+    worker.stop(&email);
+}
+
+fn run_inbox_idle_listener(app: tauri::AppHandle, email: String, worker: InboxIdleWorker) {
+    while worker.is_active(&email) {
+        let result = (|| -> Result<(), String> {
+            let auth = tauri::async_runtime::block_on(
+                crate::commands::auth::get_gmail_auth(&app, &email),
+            )?;
+            let mut session = connect(&email, &auth)?;
+            session.select("INBOX").map_err(|e| e.to_string())?;
+
+            // A short wait lets shutdown take effect promptly. The handle is
+            // cleanly ended and re-issued after each timeout; it stays
+            // read-only and does not poll or download message bodies.
+            while worker.is_active(&email) {
+                match session
+                    .idle()
+                    .map_err(|e| e.to_string())?
+                    .wait_with_timeout(Duration::from_secs(60))
+                    .map_err(|e| e.to_string())?
+                {
+                    imap::extensions::idle::WaitOutcome::MailboxChanged => {
+                        app.emit("inbox-idle-changed", &email)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    imap::extensions::idle::WaitOutcome::TimedOut => {}
+                }
+            }
+            session.logout().ok();
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            eprintln!("IMAP IDLE listener for {email} disconnected: {error}");
+            // The standard 60-second poll remains a fallback. Retry this
+            // listener shortly, allowing OAuth access tokens to refresh.
+            for _ in 0..15 {
+                if !worker.is_active(&email) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 // Fetch headers only — no bodies. Returns (metadata, full set of all UIDs matching the query).
 fn fetch_headers_query(
     email: &str,
-    password: &str,
+    auth: &GmailAuth,
     imap_query: &str,
     limit: usize,
 ) -> Result<(Vec<MessageMeta>, std::collections::HashSet<u32>), String> {
-    let mut session = connect(email, password)?;
+    let mut session = connect(email, auth)?;
     session.select("INBOX").map_err(|e| e.to_string())?;
 
     let search_result = session
@@ -191,19 +299,19 @@ fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetc
 
 fn fetch_headers(
     email: &str,
-    password: &str,
+    auth: &GmailAuth,
 ) -> Result<(Vec<MessageMeta>, std::collections::HashSet<u32>, String), String> {
     let cutoff = Utc::now() - chrono::Duration::days(SYNC_DAYS);
     let imap_since = cutoff.format("%d-%b-%Y").to_string();
     let db_since = cutoff.format("%Y-%m-%dT%H:%M:%S").to_string();
     let (metas, inbox_uids) =
-        fetch_headers_query(email, password, &format!("SINCE {}", imap_since), SYNC_LIMIT)?;
+        fetch_headers_query(email, auth, &format!("SINCE {}", imap_since), SYNC_LIMIT)?;
     Ok((metas, inbox_uids, db_since))
 }
 
 // Fetches from a non-INBOX folder located via RFC 6154 special-use attribute.
-fn fetch_folder_headers(email: &str, password: &str, special_attr: &str, fallback: &str) -> Result<Vec<MessageMeta>, String> {
-    let mut session = connect(email, password)?;
+fn fetch_folder_headers(email: &str, auth: &GmailAuth, special_attr: &str, fallback: &str) -> Result<Vec<MessageMeta>, String> {
+    let mut session = connect(email, auth)?;
     let mailbox = find_special_mailbox(&mut session, special_attr)
         .unwrap_or_else(|| fallback.to_string());
     session.select(&mailbox).map_err(|e| e.to_string())?;
@@ -231,8 +339,8 @@ fn fetch_folder_headers(email: &str, password: &str, special_attr: &str, fallbac
     Ok(result)
 }
 
-fn fetch_older_headers(email: &str, password: &str, before_imap_date: &str) -> Result<Vec<MessageMeta>, String> {
-    let (metas, _) = fetch_headers_query(email, password, &format!("BEFORE {}", before_imap_date), 200)?;
+fn fetch_older_headers(email: &str, auth: &GmailAuth, before_imap_date: &str) -> Result<Vec<MessageMeta>, String> {
+    let (metas, _) = fetch_headers_query(email, auth, &format!("BEFORE {}", before_imap_date), 200)?;
     Ok(metas)
 }
 
@@ -377,11 +485,11 @@ pub async fn sync_inbox(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
 
     let (metas, inbox_uids, db_since) =
-        tokio::task::spawn_blocking(move || fetch_headers(&email_for_imap, &password))
+        tokio::task::spawn_blocking(move || fetch_headers(&email_for_imap, &auth))
             .await
             .map_err(|e| e.to_string())??;
 
@@ -397,7 +505,7 @@ pub async fn sync_older(
     email: String,
     before_date: String,
 ) -> Result<usize, String> {
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
 
     // Parse SQLite timestamp and reformat as IMAP date (DD-Mon-YYYY)
@@ -408,7 +516,7 @@ pub async fn sync_older(
             .replace('-', "-")); // fallback: keep YYYY-MM-DD as-is (won't match but won't crash)
 
     let metas = tokio::task::spawn_blocking(move || {
-        fetch_older_headers(&email_for_imap, &password, &imap_date)
+        fetch_older_headers(&email_for_imap, &auth, &imap_date)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -422,10 +530,10 @@ pub async fn sync_sent(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
     let metas = tokio::task::spawn_blocking(move || {
-        fetch_folder_headers(&email_for_imap, &password, "\\Sent", "[Gmail]/Sent Mail")
+        fetch_folder_headers(&email_for_imap, &auth, "\\Sent", "[Gmail]/Sent Mail")
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -438,10 +546,10 @@ pub async fn sync_drafts(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
     let metas = tokio::task::spawn_blocking(move || {
-        fetch_folder_headers(&email_for_imap, &password, "\\Drafts", "[Gmail]/Drafts")
+        fetch_folder_headers(&email_for_imap, &auth, "\\Drafts", "[Gmail]/Drafts")
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -493,11 +601,11 @@ pub async fn fetch_message_body(
     .await
     .unwrap_or_else(|_| "inbox".to_string());
 
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let message_id_clone = message_id.clone();
 
     let (body_html, body_text, has_attachments) = tokio::task::spawn_blocking(move || {
-        let mut session = connect(&email, &password)?;
+        let mut session = connect(&email, &auth)?;
 
         let mailbox = match folder.as_str() {
             "sent"   => find_special_mailbox(&mut session, "\\Sent")
@@ -605,10 +713,10 @@ pub async fn prefetch_thread_bodies(
         .collect();
     if uid_to_id.is_empty() { return Ok(0); }
 
-    let password = crate::commands::auth::load_password(&app, &email)?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let uid_set = uid_to_id.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
     let fetched = tokio::task::spawn_blocking(move || {
-        let mut session = connect(&email, &password)?;
+        let mut session = connect(&email, &auth)?;
         let mailbox = match folder.as_str() {
             "sent" => find_special_mailbox(&mut session, "\\Sent").unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
             "drafts" => find_special_mailbox(&mut session, "\\Drafts").unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
@@ -717,11 +825,11 @@ async fn imap_move_thread(
         .flatten()
         .unwrap_or_else(|| "inbox".to_string());
 
-    let password = crate::commands::auth::load_password(app, &account_id)?;
+    let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
     let email = account_id.clone();
 
     tokio::task::spawn_blocking(move || {
-        let mut session = connect(&email, &password)?;
+        let mut session = connect(&email, &auth)?;
 
         let dest = find_special_mailbox(&mut session, special_attr)
             .unwrap_or_else(|| fallback.to_string());
@@ -974,10 +1082,10 @@ async fn imap_sync_thread_flags(
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
-    let password = crate::commands::auth::load_password(app, &account_id)?;
+    let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
 
     tokio::task::spawn_blocking(move || {
-        let mut session = connect(&account_id, &password)?;
+        let mut session = connect(&account_id, &auth)?;
         let mailbox = match folder.as_str() {
             "sent" => find_special_mailbox(&mut session, "\\Sent")
                 .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),

@@ -30,4 +30,8 @@ mailparse = "0.15"
 html2text = "0.12"
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
 reqwest = { version = "0.12", features = ["json"] }
-
+base64 = "0.22"
+dotenvy = "0.15"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
+sha2 = "0.10"
+url = "2"

@@ -212,7 +212,9 @@ pub async fn get_threads(
     let where_clause = match view.as_deref() {
         Some("sent")    => "t.folder = 'sent'".to_string(),
         Some("drafts")  => "t.folder = 'drafts'".to_string(),
-        Some("starred") => "t.folder = 'inbox' AND t.starred = 1 AND t.archived = 0".to_string(),
+        // Gmail's Starred label is independent of Inbox: archived (and sent)
+        // threads remain starred until the user explicitly removes the star.
+        Some("starred") => "t.starred = 1".to_string(),
         Some("archive") => "t.folder = 'inbox' AND t.archived = 1".to_string(),
         _               => {
             let cat = match &category {
@@ -221,6 +223,27 @@ pub async fn get_threads(
             };
             format!("t.folder = 'inbox' AND t.archived = 0{}", cat)
         }
+    };
+    // An archive removes a thread from Inbox but must not hide it from Gmail's
+    // independent Starred label during the Undo/delivery window. A pending
+    // trash operation, however, is hidden everywhere just like a deleted
+    // message in Gmail.
+    let pending_operation_clause = match view.as_deref() {
+        Some("starred") => r#"
+          AND NOT EXISTS (
+              SELECT 1 FROM mail_operations o
+              WHERE o.thread_id = t.id
+                AND o.operation = 'trash'
+                AND o.status IN ('pending', 'in_progress')
+          )
+        "#,
+        _ => r#"
+          AND NOT EXISTS (
+              SELECT 1 FROM mail_operations o
+              WHERE o.thread_id = t.id
+                AND o.status IN ('pending', 'in_progress')
+          )
+        "#,
     };
 
     sqlx::query_as::<_, ThreadRow>(&format!(
@@ -239,16 +262,12 @@ pub async fn get_threads(
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
-        WHERE {}
-          AND NOT EXISTS (
-              SELECT 1 FROM mail_operations o
-              WHERE o.thread_id = t.id
-                AND o.status IN ('pending', 'in_progress')
-          )
+        WHERE {} {}
         ORDER BY t.last_message_at DESC
         LIMIT ? OFFSET ?
         "#,
-        where_clause
+        where_clause,
+        pending_operation_clause,
     ))
     .bind(limit)
     .bind(offset)

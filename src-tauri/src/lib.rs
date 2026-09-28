@@ -70,6 +70,8 @@ pub fn run() {
             agent::get_ollama_models,
             agent::get_ai_model,
             agent::set_ai_model,
+            agent::get_ai_assistance_settings,
+            agent::set_ai_assistance_settings,
             agent::get_triage_preferences,
             agent::set_triage_preferences,
             agent::get_thinking_settings,

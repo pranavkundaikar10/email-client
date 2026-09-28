@@ -56,6 +56,21 @@ pub struct ThinkingSettings {
     pub background: bool,
 }
 
+/// Master control for all local-model work. It deliberately does not erase
+/// prior analysis; it only prevents new automatic or manual requests.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct AiAssistanceSettings {
+    pub enabled: bool,
+}
+
+impl Default for AiAssistanceSettings {
+    fn default() -> Self {
+        // Preserve the behaviour people already have after upgrading. New
+        // installations without Ollama can turn this off from Settings.
+        Self { enabled: true }
+    }
+}
+
 impl Default for ThinkingSettings {
     fn default() -> Self {
         Self { manual: true, background: false }
@@ -86,6 +101,7 @@ pub struct ReviewItem {
     pub deadline: Option<String>,
     pub is_actionable: bool,
     pub recommended_action: String,
+    pub analysis_available: bool,
 }
 
 /// A locally scheduled follow-up attached to an inbox thread. It never moves
@@ -204,6 +220,19 @@ async fn configured_triage_preferences(pool: &SqlitePool) -> Result<String, Stri
 async fn configured_thinking_settings(pool: &SqlitePool) -> Result<ThinkingSettings, String> {
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT value FROM app_settings WHERE key = 'ai_thinking_settings'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(stored
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default())
+}
+
+async fn configured_ai_assistance(pool: &SqlitePool) -> Result<AiAssistanceSettings, String> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM app_settings WHERE key = 'ai_assistance_settings'",
     )
     .fetch_optional(pool)
     .await
@@ -402,6 +431,9 @@ pub async fn analyze_thread(
     base_url: Option<String>,
     analysis_mode: Option<String>,
 ) -> Result<AnalysisRow, String> {
+    if !configured_ai_assistance(pool.inner()).await?.enabled {
+        return Err("AI assistance is turned off in Settings".to_string());
+    }
     let model = match model {
         Some(model) => model,
         None => configured_model(pool.inner()).await?,
@@ -557,6 +589,30 @@ pub async fn set_ai_model(
 }
 
 #[tauri::command]
+pub async fn get_ai_assistance_settings(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<AiAssistanceSettings, String> {
+    configured_ai_assistance(pool.inner()).await
+}
+
+#[tauri::command]
+pub async fn set_ai_assistance_settings(
+    pool: tauri::State<'_, SqlitePool>,
+    settings: AiAssistanceSettings,
+) -> Result<(), String> {
+    let value = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO app_settings (key, value) VALUES ('ai_assistance_settings', ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(value)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_triage_preferences(pool: tauri::State<'_, SqlitePool>) -> Result<String, String> {
     configured_triage_preferences(pool.inner()).await
 }
@@ -617,6 +673,9 @@ pub async fn analyze_inbox(
     limit: Option<i64>,
     analysis_mode: Option<String>,
 ) -> Result<Vec<AnalysisRow>, String> {
+    if !configured_ai_assistance(pool.inner()).await?.enabled {
+        return Ok(Vec::new());
+    }
     let limit = limit.unwrap_or(25);
 
     let stale_thread_ids: Vec<String> = sqlx::query_scalar(
@@ -658,6 +717,9 @@ pub async fn get_auto_analysis_candidates(
     pool: tauri::State<'_, SqlitePool>,
     limit: Option<i64>,
 ) -> Result<Vec<AutoAnalysisCandidate>, String> {
+    if !configured_ai_assistance(pool.inner()).await?.enabled {
+        return Ok(Vec::new());
+    }
     let limit = limit.unwrap_or(1).clamp(1, 5);
     let today_start = chrono::Local::now()
         .date_naive()
@@ -695,6 +757,9 @@ pub async fn get_auto_analysis_candidates(
 pub async fn get_auto_analysis_pending_count(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<i64, String> {
+    if !configured_ai_assistance(pool.inner()).await?.enabled {
+        return Ok(0);
+    }
     let today_start = chrono::Local::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -728,11 +793,13 @@ pub async fn get_review_queue(
     limit: Option<i64>,
     sort: Option<String>,
 ) -> Result<Vec<ReviewItem>, String> {
+    let ai_assistance_enabled = configured_ai_assistance(pool.inner()).await?.enabled;
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let order_by = match sort.as_deref() {
         Some("oldest") => "t.last_message_at ASC",
         Some("newest") => "t.last_message_at DESC",
-        _ => "a.importance DESC, t.last_message_at DESC",
+        _ if ai_assistance_enabled => "a.importance DESC, t.last_message_at DESC",
+        _ => "t.last_message_at DESC",
     };
     let mut review_window_start = (chrono::Local::now() - chrono::Duration::days(6))
         .date_naive()
@@ -742,15 +809,20 @@ pub async fn get_review_queue(
         .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
 
     let query = r#"
-        SELECT a.thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
+        SELECT t.id AS thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
                t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
                COALESCE(m.from_name, '') AS from_name,
                COALESCE(m.from_email, '') AS from_email,
                COALESCE(m.to_emails, '[]') AS to_emails,
-               a.importance, a.category, a.summary, a.action_items,
-               a.deadline, a.is_actionable, a.recommended_action
-        FROM email_analysis a
-        JOIN threads t ON t.id = a.thread_id
+               COALESCE(a.importance, 0) AS importance,
+               COALESCE(a.category, '') AS category,
+               COALESCE(a.summary, '') AS summary,
+               COALESCE(a.action_items, '[]') AS action_items,
+               a.deadline, COALESCE(a.is_actionable, 0) AS is_actionable,
+               COALESCE(a.recommended_action, 'review') AS recommended_action,
+               a.thread_id IS NOT NULL AS analysis_available
+        FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_reviews r ON r.thread_id = t.id
@@ -758,6 +830,7 @@ pub async fn get_review_queue(
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ? AND t.last_message_at < ?
           AND r.thread_id IS NULL
+          AND (? = 0 OR a.thread_id IS NOT NULL)
         ORDER BY {order_by}
         LIMIT ?
         "#
@@ -770,6 +843,7 @@ pub async fn get_review_queue(
         let rows = sqlx::query_as::<_, ReviewItem>(&query)
             .bind(&review_window_start)
             .bind(&review_window_end)
+            .bind(if ai_assistance_enabled { 1 } else { 0 })
             .bind(limit)
             .fetch_all(pool.inner())
             .await

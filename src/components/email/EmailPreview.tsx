@@ -531,6 +531,10 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     queryFn: () => api.getMessages(selectedThreadId!),
     enabled: !!selectedThreadId,
   });
+  const { data: aiAssistanceSettings = { enabled: true } } = useQuery({
+    queryKey: ["ai_assistance_settings"],
+    queryFn: api.getAiAssistanceSettings,
+  });
   useUpcomingBodyPrefetch(email);
 
   const { data: reviewQueue = [] } = useQuery({
@@ -776,7 +780,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       <div className="preview-toolbar flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3 sm:px-6">
         <h2 className="min-w-0 truncate text-sm font-semibold text-gray-900">{subject}</h2>
         <div className="flex shrink-0 items-center gap-1">
-          <button
+          {aiAssistanceSettings.enabled && <button
             onClick={() => { if (selectedThreadId) analyzeThread(selectedThreadId); }}
             disabled={analyzing || archiving || deleting}
             title="Analyze this email"
@@ -784,7 +788,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
           >
             <Sparkles size={14} />
             {analyzing ? "Analyzing…" : "Analyze"}
-          </button>
+          </button>}
           <button
             onClick={openReply}
             disabled={messages.length === 0}
@@ -820,15 +824,20 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         </div>
       </div>
 
-      {/* AI-extracted action items, if this thread has been analyzed */}
+      {/* AI recommendations enrich the usual Review Queue decision controls. */}
       {reviewMode && reviewItem && (
         <div className="mx-6 mt-4 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-500">AI recommendation</p>
-              <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
-                {recommendationLabel(reviewItem.recommended_action)}
-              </p>
+              {reviewItem.analysis_available ? <>
+                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-500">AI recommendation</p>
+                <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
+                  {recommendationLabel(reviewItem.recommended_action)}
+                </p>
+              </> : <>
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Review this email</p>
+                <p className="mt-1.5 text-sm font-medium text-gray-700">Choose what happens next</p>
+              </>}
             </div>
             <div className="flex items-center gap-2">
               <button

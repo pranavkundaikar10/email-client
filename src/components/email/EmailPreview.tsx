@@ -574,6 +574,9 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
       }
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // Plain-letter mail actions must not fire as a side effect of app or
+      // system shortcuts such as Control-Shift-F for fullscreen.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "r" && selectedThreadId) {
         e.preventDefault();

@@ -34,6 +34,7 @@ const sections = [
     rows: [
       ["/", "Search"],
       ["⌘ K", "Command palette"],
+      ["⌃ ⇧ F", "Enter or exit app fullscreen"],
       ["Esc", "Close or deselect"],
       ["?", "Show keyboard shortcuts"],
     ],

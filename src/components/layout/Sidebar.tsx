@@ -27,9 +27,9 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
 
 export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, profilePicture, inboxUnread, followUpDueCount }: Props) {
   return (
-    <aside className="w-14 flex flex-col items-center py-4 gap-1 bg-gray-950 border-r border-gray-800 flex-shrink-0">
+    <aside className="app-nav-rail flex w-14 flex-shrink-0 flex-col items-center gap-1 border-r py-4">
       {/* Avatar */}
-      <div className="relative w-8 h-8 overflow-hidden rounded-full bg-indigo-500 flex items-center justify-center mb-3">
+      <div className="app-avatar relative mb-3 flex h-8 w-8 items-center justify-center overflow-hidden rounded-full">
         <span className="text-white text-xs font-semibold">
           {email[0]?.toUpperCase() ?? "?"}
         </span>
@@ -48,9 +48,7 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
         title="Review queue"
         className={cn(
           "w-9 h-9 flex items-center justify-center rounded-lg transition-colors mb-1",
-          activeView === "review"
-            ? "bg-indigo-500 text-white"
-            : "text-indigo-400 hover:text-indigo-200 hover:bg-indigo-500/15"
+          activeView === "review" ? "nav-primary-active text-white" : "nav-primary-idle"
         )}
       >
         <ListChecks size={17} />
@@ -61,13 +59,11 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
         title="Follow-ups (G F)"
         className={cn(
           "relative mb-1 flex h-9 w-9 items-center justify-center rounded-lg transition-colors",
-          activeView === "follow_ups"
-            ? "bg-violet-500 text-white"
-            : "text-violet-300 hover:bg-violet-500/15 hover:text-violet-100"
+          activeView === "follow_ups" ? "nav-primary-active text-white" : "nav-primary-idle"
         )}
       >
         <CalendarClock size={17} />
-        {followUpDueCount > 0 && <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-500 px-0.5 text-[9px] font-bold leading-none text-white">
+        {followUpDueCount > 0 && <span className="app-accent-dot absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full px-0.5 text-[9px] font-bold leading-none text-white">
           {followUpDueCount > 99 ? "99+" : followUpDueCount}
         </span>}
       </button>
@@ -88,9 +84,7 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
           title={label}
           className={cn(
             "relative w-9 h-9 flex items-center justify-center rounded-lg transition-colors",
-            activeView === id
-              ? "bg-gray-700 text-white"
-              : "text-gray-500 hover:text-gray-300 hover:bg-gray-800"
+            activeView === id ? "nav-secondary-active text-white" : "nav-secondary-idle"
           )}
         >
           <Icon size={17} />
@@ -108,21 +102,21 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
       <button
         onClick={onDigest}
         title="Digest — action items from unread mail"
-        className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-600 hover:text-indigo-400 hover:bg-gray-800 transition-colors"
+        className="nav-utility w-9 h-9 flex items-center justify-center rounded-lg transition-colors"
       >
         <Sparkles size={15} />
       </button>
       <button
         onClick={onSplits}
         title="Settings"
-        className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+        className="nav-utility w-9 h-9 flex items-center justify-center rounded-lg transition-colors"
       >
         <SlidersHorizontal size={15} />
       </button>
       <button
         onClick={onLogout}
         title="Sign out"
-        className="w-9 h-9 flex items-center justify-center rounded-lg text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+        className="nav-utility w-9 h-9 flex items-center justify-center rounded-lg transition-colors"
       >
         <LogOut size={15} />
       </button>

@@ -246,9 +246,9 @@ export default function SplitsSettings({ onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="flex h-[min(590px,76vh)] w-[min(840px,92vw)] flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+      <div className="app-dialog flex h-[min(590px,76vh)] w-[min(840px,92vw)] flex-col overflow-hidden rounded-xl shadow-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <div className="app-dialog-header flex items-center justify-between border-b px-6 py-4">
           <h2 className="text-sm font-semibold text-gray-900">Settings</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X size={15} />
@@ -256,7 +256,7 @@ export default function SplitsSettings({ onClose }: Props) {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <aside className="w-44 flex-shrink-0 border-r border-gray-100 bg-gray-50/60 px-3 py-4">
+          <aside className="app-dialog-sidebar w-44 flex-shrink-0 border-r px-3 py-4">
             <p className="px-2 pb-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Settings</p>
             <nav className="space-y-1" aria-label="Settings sections">
               {([
@@ -269,7 +269,7 @@ export default function SplitsSettings({ onClose }: Props) {
                   onClick={() => setActiveSection(section)}
                   className={`w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
                     activeSection === section
-                      ? "bg-white font-medium text-gray-900 shadow-sm ring-1 ring-gray-200"
+                      ? "app-dialog-nav-active font-medium"
                       : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
                   }`}
                 >
@@ -308,7 +308,7 @@ export default function SplitsSettings({ onClose }: Props) {
                     value={selectedModel ?? configuredModel ?? ""}
                     onChange={(e) => setSelectedModel(e.target.value)}
                     disabled={ollamaModels.length === 0}
-                    className="max-w-64 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 outline-none focus:border-indigo-400 disabled:opacity-50"
+                    className="app-control max-w-64 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700 outline-none disabled:opacity-50"
                   >
                     {ollamaModels.length === 0 ? (
                       <option value="">No local models found</option>
@@ -374,7 +374,7 @@ export default function SplitsSettings({ onClose }: Props) {
               maxLength={1000}
               rows={5}
               placeholder="Example: I’m targeting backend and platform engineering roles. Prioritize recruiter scheduling, assessments, interviews, visa questions, and deadlines."
-              className="mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300 focus:border-indigo-400"
+              className="app-control mt-2 w-full resize-y rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-700 outline-none placeholder:text-gray-300"
             />
             <div className="mt-1.5 flex items-start justify-between gap-3 text-[10px] text-gray-400">
               <span>Core JSON rules and attachment protection always remain enabled.</span>
@@ -500,7 +500,7 @@ export default function SplitsSettings({ onClose }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100">
+        <div className="app-dialog-footer flex items-center justify-between border-t px-6 py-4">
           {error ? (
             <p className="text-xs text-red-500 truncate">{error}</p>
           ) : (
@@ -509,14 +509,14 @@ export default function SplitsSettings({ onClose }: Props) {
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700"
+              className="button-secondary rounded-lg px-3 py-1.5 text-sm"
             >
               Cancel
             </button>
             <button
               onClick={save}
               disabled={saving}
-              className="px-4 py-1.5 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-700 disabled:opacity-40"
+              className="button-primary rounded-lg px-4 py-1.5 text-sm disabled:opacity-40"
             >
               {saving ? "Saving…" : "Save"}
             </button>

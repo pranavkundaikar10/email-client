@@ -155,9 +155,9 @@ export default function CommandPalette({ onViewChange, onClose, splits, onSplitC
       className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-black/30 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden">
+      <div className="app-dialog w-full max-w-lg overflow-hidden rounded-xl shadow-2xl">
         {/* Input */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100">
+        <div className="app-dialog-header flex items-center gap-3 border-b px-4 py-3">
           <Search size={15} className="text-gray-400 flex-shrink-0" />
           <input
             ref={inputRef}
@@ -199,7 +199,7 @@ export default function CommandPalette({ onViewChange, onClose, splits, onSplitC
         </div>
 
         {/* Footer hint */}
-        <div className="px-4 py-2 border-t border-gray-50 flex gap-4 text-xs text-gray-400">
+        <div className="app-dialog-footer flex gap-4 border-t px-4 py-2 text-xs text-gray-400">
           <span>↑↓ navigate</span>
           <span>↵ select</span>
           <span>esc close</span>

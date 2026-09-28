@@ -3,7 +3,7 @@ const JOB_CATEGORY_STYLE: Record<string, { label: string; className: string }> =
   rejection: { label: "Rejection", className: "bg-gray-100 text-gray-600 ring-gray-200" },
   assessment: { label: "Assessment", className: "bg-amber-50 text-amber-700 ring-amber-100" },
   screening: { label: "Recruiter / screening", className: "bg-sky-50 text-sky-700 ring-sky-100" },
-  interview: { label: "Interview", className: "bg-violet-50 text-violet-700 ring-violet-100" },
+  interview: { label: "Interview", className: "bg-indigo-50 text-indigo-700 ring-indigo-100" },
   offer: { label: "Offer", className: "bg-emerald-50 text-emerald-700 ring-emerald-100" },
   other: { label: "Other", className: "bg-gray-100 text-gray-600 ring-gray-200" },
 };

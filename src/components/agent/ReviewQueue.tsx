@@ -92,18 +92,18 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
                   </span>
                 </div>
 
-                <div className="mt-5 rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3">
+                <div className="mt-5 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-500">AI analysis</p>
-                  <p className="mt-1 text-sm leading-relaxed text-indigo-900">{item.summary || "No summary available."}</p>
+                  <p className="mt-1 text-sm leading-relaxed text-gray-800">{item.summary || "No summary available."}</p>
                   {item.deadline && <p className="mt-2 text-xs font-medium text-red-600">Due {item.deadline}</p>}
                   {items.length > 0 && (
                     <ul className="mt-3 space-y-1">
-                      {items.map((action, index) => <li key={index} className="text-xs text-indigo-800 flex gap-2"><span>•</span>{action}</li>)}
+                      {items.map((action, index) => <li key={index} className="flex gap-2 text-xs text-gray-700"><span className="text-indigo-400">•</span>{action}</li>)}
                     </ul>
                   )}
                 </div>
 
-                <div className="mt-4 flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2.5">
+                <div className="mt-4 flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50 px-3 py-2.5">
                   <span className="text-xs text-gray-500">Suggested decision</span>
                   <span className={`text-xs font-semibold ${suggested ? recommendationTone(suggested) : "text-amber-700"}`}>
                     {suggested ? recommendationLabel(suggested) : "Needs your review"}
@@ -117,7 +117,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
           <div className="flex items-center justify-between gap-3">
             <button onClick={openEmail} className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800"><Eye size={14} /> Open email</button>
             <div className="flex items-center gap-2">
-              <button disabled={saving} onClick={() => decide("follow_up")} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-40"><CalendarClock size={13} /> Follow up</button>
+              <button disabled={saving} onClick={() => decide("follow_up")} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-100 disabled:opacity-40"><CalendarClock size={13} /> Follow up</button>
               <button disabled={saving} onClick={() => decide("keep")} className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-indigo-700 hover:bg-indigo-50 disabled:opacity-40"><Bookmark size={13} /> Keep</button>
               <button disabled={saving} onClick={() => decide("archived")} className="flex items-center gap-1 rounded-lg bg-gray-900 px-3 py-1.5 text-xs text-white hover:bg-gray-700 disabled:opacity-40"><Archive size={13} /> Archive</button>
             </div>

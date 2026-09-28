@@ -18,6 +18,8 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 
 ## Install a release
 
+Maintainers can create a tester build from GitHub: open **Actions → Build tester installers → Run workflow**, enter a new tag such as `v0.1.1-test.1`, and leave **Mark this as a tester prerelease** enabled. When all builds finish, share the GitHub Release link—not the temporary Actions artifact link—with testers.
+
 ### macOS
 
 Download the DMG for your Mac from the repository's **Releases** page:

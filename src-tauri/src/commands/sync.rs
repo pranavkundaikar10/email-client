@@ -487,11 +487,26 @@ pub async fn sync_inbox(
 ) -> Result<usize, String> {
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
+    let is_oauth = matches!(auth, GmailAuth::OAuthAccessToken(_));
 
-    let (metas, inbox_uids, db_since) =
-        tokio::task::spawn_blocking(move || fetch_headers(&email_for_imap, &auth))
-            .await
-            .map_err(|e| e.to_string())??;
+    let first_attempt = tokio::task::spawn_blocking(move || fetch_headers(&email_for_imap, &auth))
+        .await
+        .map_err(|e| e.to_string())?;
+    let (metas, inbox_uids, db_since) = match first_attempt {
+        Ok(result) => result,
+        Err(error) if is_oauth && error.to_ascii_lowercase().contains("authenticationfailed") => {
+            // A machine may have slept past the token's real expiry. Refresh
+            // once and retry the read-only inbox sync before asking the user
+            // to reconnect their Google account.
+            crate::commands::auth::invalidate_cached_access_token(&email);
+            let refreshed_auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
+            let retry_email = email.clone();
+            tokio::task::spawn_blocking(move || fetch_headers(&retry_email, &refreshed_auth))
+                .await
+                .map_err(|e| e.to_string())??
+        }
+        Err(error) => return Err(error),
+    };
 
     let count = write_metas_to_db(pool.inner(), &email, "inbox", metas).await?;
     reconcile_removed(pool.inner(), &email, &db_since, inbox_uids).await?;

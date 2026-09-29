@@ -120,6 +120,13 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
   });
+  const { data: ollamaModels = [], isSuccess: ollamaAvailable } = useQuery({
+    queryKey: ["ollama_models"],
+    queryFn: api.getOllamaModels,
+    enabled: aiAssistanceSettings.enabled,
+    retry: false,
+    refetchInterval: 60_000,
+  });
 
   const { data: unreadCounts = {} } = useQuery({
     queryKey: ["unread_counts"],
@@ -239,7 +246,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const processOneRecentEmail = useCallback(async () => {
     // Keep local inference deliberately low-impact: one email at a time,
     // never in parallel, and only for mail received today.
-    if (!aiAssistanceSettings.enabled || backgroundAnalysisRunning.current) return;
+    if (!aiAssistanceSettings.enabled || !ollamaAvailable || ollamaModels.length === 0 || backgroundAnalysisRunning.current) return;
     backgroundAnalysisRunning.current = true;
     try {
       const [candidate] = await api.getAutoAnalysisCandidates(1);
@@ -259,7 +266,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     } finally {
       backgroundAnalysisRunning.current = false;
     }
-  }, [aiAssistanceSettings.enabled, email, queryClient]);
+  }, [aiAssistanceSettings.enabled, email, ollamaAvailable, ollamaModels.length, queryClient]);
 
   // Both the periodic fallback and IMAP IDLE events use this single sync path.
   // It owns cache invalidation and keeps local LLM work serialized.

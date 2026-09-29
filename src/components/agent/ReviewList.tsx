@@ -46,6 +46,14 @@ export default function ReviewList() {
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
   });
+  const { data: ollamaModels = [], isError: ollamaFailed, isSuccess: ollamaLoaded } = useQuery({
+    queryKey: ["ollama_models"],
+    queryFn: api.getOllamaModels,
+    enabled: aiAssistanceSettings.enabled,
+    retry: false,
+    refetchInterval: 60_000,
+  });
+  const aiUnavailable = aiAssistanceSettings.enabled && (ollamaFailed || (ollamaLoaded && ollamaModels.length === 0));
   const { data: pendingCount = 0 } = useQuery({
     queryKey: ["auto_analysis_pending_count"],
     queryFn: api.getAutoAnalysisPendingCount,
@@ -130,7 +138,12 @@ export default function ReviewList() {
   if (isLoading) return <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
   if (visibleReviewThreads.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-      {aiAssistanceSettings.enabled && pendingCount > 0 ? <>
+      {aiUnavailable ? <>
+        <p className="text-sm font-medium text-gray-700">AI review is unavailable</p>
+        <p className="mt-1 max-w-64 text-xs leading-relaxed text-gray-400">
+          {ollamaFailed ? "Start Ollama, or turn off AI assistance in Settings to use this as a manual Review Queue." : "Choose an installed local model in Settings, or turn off AI assistance to use this as a manual Review Queue."}
+        </p>
+      </> : aiAssistanceSettings.enabled && pendingCount > 0 ? <>
         <LoaderCircle size={22} className="animate-spin text-indigo-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">Preparing {pendingCount} {pendingCount === 1 ? "email" : "emails"}</p>
       </> : <>
@@ -151,7 +164,7 @@ export default function ReviewList() {
     <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
       <div className="flex items-center gap-1.5">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{visibleReviewThreads.length} to review</span>
-        {aiAssistanceSettings.enabled && pendingCount > 0 && <span
+        {aiUnavailable ? <span className="text-[10px] font-medium text-amber-700">AI unavailable</span> : aiAssistanceSettings.enabled && pendingCount > 0 && <span
           className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-indigo-500"
           title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
           aria-label={`${pendingCount} ${pendingCount === 1 ? "email" : "emails"} awaiting AI analysis`}

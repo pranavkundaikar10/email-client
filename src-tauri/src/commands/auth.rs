@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Manager};
 use url::Url;
 use uuid::Uuid;
@@ -54,7 +54,9 @@ struct StoredAccount {
 #[derive(Clone)]
 struct CachedAccessToken {
     value: String,
-    expires_at: Instant,
+    // OAuth expiry is wall-clock time. Unlike a process-relative timer, this
+    // remains meaningful after a laptop sleeps for several hours.
+    expires_at: SystemTime,
 }
 
 static ACCESS_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, CachedAccessToken>>> = OnceLock::new();
@@ -198,7 +200,7 @@ async fn access_token_for(email: &str) -> Result<String, String> {
         .map_err(|_| "OAuth token cache is unavailable".to_string())?
         .get(email)
     {
-        if cached.expires_at > Instant::now() + Duration::from_secs(60) {
+        if cached.expires_at > SystemTime::now() + Duration::from_secs(60) {
             return Ok(cached.value.clone());
         }
     }
@@ -214,7 +216,7 @@ async fn access_token_for(email: &str) -> Result<String, String> {
         .map_err(|_| "OAuth token cache is unavailable".to_string())?
         .get(email)
     {
-        if cached.expires_at > Instant::now() + Duration::from_secs(60) {
+        if cached.expires_at > SystemTime::now() + Duration::from_secs(60) {
             return Ok(cached.value.clone());
         }
     }
@@ -250,10 +252,22 @@ async fn access_token_for(email: &str) -> Result<String, String> {
             email.to_string(),
             CachedAccessToken {
                 value: response.access_token.clone(),
-                expires_at: Instant::now() + Duration::from_secs(response.expires_in),
+                expires_at: SystemTime::now() + Duration::from_secs(response.expires_in),
             },
         );
     Ok(response.access_token)
+}
+
+/// Discard only the short-lived in-memory token. The refresh token remains in
+/// the operating-system credential store, so the next authentication obtains
+/// a replacement without asking the user to sign in again.
+pub fn invalidate_cached_access_token(email: &str) {
+    if let Ok(mut cache) = ACCESS_TOKEN_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.remove(email);
+    }
 }
 
 #[tauri::command]
@@ -368,7 +382,7 @@ pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, Str
             user.email.clone(),
             CachedAccessToken {
                 value: token.access_token,
-                expires_at: Instant::now() + Duration::from_secs(token.expires_in),
+                expires_at: SystemTime::now() + Duration::from_secs(token.expires_in),
             },
         );
     }

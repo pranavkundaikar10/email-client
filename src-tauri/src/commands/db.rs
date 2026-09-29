@@ -135,10 +135,12 @@ pub async fn merge_legacy_app_data(app: &AppHandle, pool: &SqlitePool) -> Result
             "INSERT OR IGNORE INTO email_analysis (thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at, is_job_related, job_category, recommended_action) SELECT thread_id, is_actionable, importance, category, summary, action_items, deadline, model, analyzed_at, is_job_related, job_category, recommended_action FROM legacy.email_analysis",
             "INSERT OR IGNORE INTO email_reviews (thread_id, decision, reviewed_at) SELECT thread_id, decision, reviewed_at FROM legacy.email_reviews",
             "INSERT OR IGNORE INTO follow_ups (thread_id, due_at, status, created_at, updated_at) SELECT thread_id, due_at, status, created_at, updated_at FROM legacy.follow_ups",
-            // Splits and preferences are user-authored local configuration, so
-            // the legacy version should win over the fresh defaults.
+            // Splits are copied from the legacy app during the one-time data
+            // recovery. App settings only fill missing values: a setting that
+            // has already been changed in the renamed app must never revert
+            // merely because migration cleanup is retried after a restart.
             "INSERT OR REPLACE INTO splits (id, name, position, rules) SELECT id, name, position, rules FROM legacy.splits",
-            "INSERT OR REPLACE INTO app_settings (key, value) SELECT key, value FROM legacy.app_settings",
+            "INSERT OR IGNORE INTO app_settings (key, value) SELECT key, value FROM legacy.app_settings",
         ] {
             sqlx::query(statement).execute(&mut *connection).await.map_err(|e| e.to_string())?;
         }
@@ -150,16 +152,26 @@ pub async fn merge_legacy_app_data(app: &AppHandle, pool: &SqlitePool) -> Result
     if merge_result.is_err() {
         let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
     }
-    let detach_result = sqlx::query("DETACH DATABASE legacy").execute(&mut *connection).await;
     merge_result?;
-    detach_result.map_err(|e| e.to_string())?;
+    let detach_result = sqlx::query("DETACH DATABASE legacy").execute(&mut *connection).await;
 
-    // Rebuild the external-content search index after importing threads.
+    // The import itself has committed at this point. A best-effort DETACH can
+    // occasionally fail while SQLite still holds an internal statement; the
+    // connection will be dropped on return, so do not repeat the whole import
+    // (and overwrite user choices) on every later launch because of it.
+    if let Err(error) = detach_result {
+        eprintln!("Could not detach legacy database after migration: {error}");
+    }
+
+    fs::write(&marker, "merged\n").map_err(|e| e.to_string())?;
+
+    // Rebuild the external-content search index after importing threads. The
+    // one-time data import is already complete even if this derived index
+    // rebuild needs to be retried separately.
     sqlx::query("INSERT INTO threads_fts(threads_fts) VALUES('rebuild')")
         .execute(&mut *connection)
         .await
         .map_err(|e| e.to_string())?;
-    fs::write(&marker, "merged\n").map_err(|e| e.to_string())?;
     Ok(())
 }
 

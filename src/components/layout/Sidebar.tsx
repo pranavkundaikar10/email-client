@@ -14,6 +14,7 @@ interface Props {
   profilePicture: string | null;
   inboxUnread: number;
   followUpDueCount: number;
+  searchActive: boolean;
 }
 
 const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string }[] = [
@@ -25,7 +26,7 @@ const navItems: { id: View; icon: typeof Inbox; label: string; shortcut: string 
   { id: "search",  icon: Search,   label: "Search",   shortcut: "/"   },
 ];
 
-export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, profilePicture, inboxUnread, followUpDueCount }: Props) {
+export default function Sidebar({ activeView, onViewChange, email, onLogout, onSplits, onCompose, onDigest, profilePicture, inboxUnread, followUpDueCount, searchActive }: Props) {
   return (
     <aside className="app-nav-rail flex w-14 flex-shrink-0 flex-col items-center gap-1 border-r py-4">
       {/* Avatar */}
@@ -84,7 +85,7 @@ export default function Sidebar({ activeView, onViewChange, email, onLogout, onS
           title={label}
           className={cn(
             "relative w-9 h-9 flex items-center justify-center rounded-lg transition-colors",
-            activeView === id ? "nav-secondary-active text-white" : "nav-secondary-idle"
+            (id === "search" ? searchActive : activeView === id) ? "nav-secondary-active text-white" : "nav-secondary-idle"
           )}
         >
           <Icon size={17} />

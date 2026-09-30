@@ -199,6 +199,12 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   }
 
   function changeView(view: View) {
+    // Search is a global workspace overlay, not a separate mailbox. Keep the
+    // current view intact so Escape restores exactly where the user started.
+    if (view === "search") {
+      searchInputRef.current?.focus();
+      return;
+    }
     startupViewResolved.current = true;
     if (view !== activeView) {
       const state = useAppStore.getState();
@@ -210,12 +216,27 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
   useKeyboardNav({
     onViewChange: changeView,
-    onSearchFocus: () => { searchInputRef.current?.focus(); },
     splits: splitDefs,
     onSplitChange: switchTab,
     activeSplitId: effectiveSplitId,
     splitNavigationEnabled: showTabs && !composeOpen && !splitsOpen && !digestOpen && !commandPaletteOpen && !shortcutsOpen,
   });
+
+  // / — global mail search. A native listener is more reliable than the
+  // hotkey wrapper for this punctuation key in the desktop WebView. It is
+  // deliberately scoped to the mail workspace, never text entry or dialogs.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (composeOpen || splitsOpen || digestOpen || commandPaletteOpen || shortcutsOpen) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [commandPaletteOpen, composeOpen, digestOpen, shortcutsOpen, splitsOpen]);
 
   // App-controlled fullscreen keeps Escape available for email actions. On
   // macOS this deliberately uses Tauri's simple fullscreen mode instead of
@@ -342,6 +363,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
         profilePicture={accountProfile?.profile_picture ?? null}
         inboxUnread={Object.values(unreadCounts).reduce((a, b) => a + b, 0)}
         followUpDueCount={followUpDueCount}
+        searchActive={searchQuery.length > 0}
       />
 
       {/* Right content: tabs on top, then thread list + email preview below */}
@@ -387,7 +409,12 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
               inputRef={searchInputRef}
             />
 
-            {activeView === "review" ? <ReviewList /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
+            {isSearching ? <ThreadList
+              activeView={activeView}
+              effectiveSplitId={effectiveSplitId}
+              searchResults={searchResults}
+              isSearching
+            /> : activeView === "review" ? <ReviewList /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
@@ -396,7 +423,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           </div>
 
           {/* Email preview */}
-          <EmailPreview email={email} reviewMode={activeView === "review"} followUpMode={activeView === "follow_ups"} />
+          <EmailPreview email={email} reviewMode={activeView === "review" && !isSearching} followUpMode={activeView === "follow_ups" && !isSearching} />
 
         </div>{/* end thread list + email preview row */}
       </div>{/* end right content column */}

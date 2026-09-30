@@ -15,6 +15,15 @@ export default function SearchBar({ value, onChange, onClear, inputRef }: Props)
         ref={inputRef}
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          // Search is shared by every mail view. Escape exits search mode,
+          // restores the underlying workspace (including split Tab handling),
+          // and returns keyboard focus out of the input in one action.
+          event.preventDefault();
+          onClear();
+          event.currentTarget.blur();
+        }}
         placeholder="Search emails…"
         className="flex-1 text-sm outline-none placeholder:text-gray-400 bg-transparent"
       />

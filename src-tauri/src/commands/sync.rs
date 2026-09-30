@@ -4,7 +4,10 @@ use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use chrono::Utc;
@@ -12,7 +15,7 @@ use chrono::NaiveDateTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use crate::commands::auth::GmailAuth;
 
 type ImapSession = Session<native_tls::TlsStream<TcpStream>>;
@@ -624,7 +627,7 @@ pub async fn fetch_message_body(
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let message_id_clone = message_id.clone();
 
-    let (body_html, body_text, has_attachments) = tokio::task::spawn_blocking(move || {
+    let (body_html, body_text, has_attachments, attachments) = tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &auth)?;
 
         let mailbox = match folder.as_str() {
@@ -661,9 +664,10 @@ pub async fn fetch_message_body(
             .ok_or_else(|| format!("UID {} returned no body data", uid_to_fetch))?;
 
         let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
-        let result = extract_body_parts(&parsed);
+        let (body_html, body_text, has_attachments) = extract_body_parts(&parsed);
+        let attachments = extract_attachment_metadata(&parsed);
         session.logout().ok();
-        Ok::<_, String>(result)
+        Ok::<_, String>((body_html, body_text, has_attachments, attachments))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -678,12 +682,130 @@ pub async fn fetch_message_body(
     .execute(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
+    store_attachment_metadata(pool.inner(), &message_id_clone, &attachments).await?;
 
     let messages = crate::commands::db::get_messages(pool, thread_id).await?;
     messages
         .into_iter()
         .find(|m| m.id == message_id_clone)
         .ok_or_else(|| "Message not found after fetch".to_string())
+}
+
+#[derive(sqlx::FromRow)]
+struct DownloadAttachmentRow {
+    message_id: String,
+    part_path: String,
+    filename: String,
+    imap_uid: String,
+    folder: String,
+    account_id: String,
+}
+
+fn part_at_path<'a>(mail: &'a mailparse::ParsedMail<'a>, path: &str) -> Option<&'a mailparse::ParsedMail<'a>> {
+    let mut part = mail;
+    for segment in path.split('.') {
+        let index = segment.parse::<usize>().ok()?.checked_sub(1)?;
+        part = part.subparts.get(index)?;
+    }
+    Some(part)
+}
+
+fn safe_download_filename(filename: &str) -> String {
+    let safe: String = filename
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') { character } else { '_' })
+        .collect();
+    let safe = safe.trim().trim_matches('.');
+    if safe.is_empty() { "attachment".to_string() } else { safe.to_string() }
+}
+
+fn save_download(directory: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let original = Path::new(filename);
+    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("attachment");
+    let extension = original.extension().and_then(|value| value.to_str());
+    for suffix in 0..10_000 {
+        let name = match (suffix, extension) {
+            (0, _) => filename.to_string(),
+            (_, Some(extension)) => format!("{stem} ({suffix}).{extension}"),
+            _ => format!("{stem} ({suffix})"),
+        };
+        let candidate = directory.join(name);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(mut file) => {
+                file.write_all(bytes).map_err(|e| format!("Could not save attachment: {e}"))?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not save attachment: {error}")),
+        }
+    }
+    let candidate = directory.join(format!("{stem}-{}.download", Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&candidate)
+        .map_err(|e| format!("Could not save attachment: {e}"))?;
+    file.write_all(bytes).map_err(|e| format!("Could not save attachment: {e}"))?;
+    Ok(candidate)
+}
+
+/// Downloads one user-requested attachment to the system Downloads directory.
+/// This intentionally re-fetches only that message; attachments are never
+/// downloaded during normal sync, prefetch, or AI triage.
+#[tauri::command]
+pub async fn download_attachment(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    email: String,
+    attachment_id: String,
+) -> Result<String, String> {
+    let row: DownloadAttachmentRow = sqlx::query_as(
+        r#"SELECT a.message_id, a.part_path, a.filename, m.imap_uid, t.folder, t.account_id
+           FROM message_attachments a
+           JOIN messages m ON m.id = a.message_id
+           JOIN threads t ON t.id = m.thread_id
+           WHERE a.id = ?"#,
+    )
+    .bind(attachment_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|_| "Attachment is no longer available. Reopen the email and try again.".to_string())?;
+    let expected_account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
+    if row.account_id != expected_account_id {
+        return Err("This attachment belongs to a different account.".to_string());
+    }
+
+    let auth = crate::commands::auth::get_gmail_auth(&app, &row.account_id).await?;
+    let downloads = app.path().download_dir().map_err(|e| format!("Could not find Downloads: {e}"))?;
+    let filename = safe_download_filename(&row.filename);
+    tokio::task::spawn_blocking(move || {
+        let mut session = connect(&email, &auth)?;
+        let mailbox = match row.folder.as_str() {
+            "sent" => find_special_mailbox(&mut session, "\\Sent").unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "drafts" => find_special_mailbox(&mut session, "\\Drafts").unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            _ => "INBOX".to_string(),
+        };
+        session.select(&mailbox).map_err(|e| e.to_string())?;
+        let uid = if row.imap_uid.is_empty() {
+            session
+                .uid_search(format!("HEADER MESSAGE-ID \"{}\"", row.message_id))
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .next()
+                .map(|value| value.to_string())
+                .ok_or_else(|| "Could not find this attachment in Gmail. Try syncing first.".to_string())?
+        } else {
+            row.imap_uid
+        };
+        let response = session.uid_fetch(&uid, "BODY.PEEK[]").map_err(|e| e.to_string())?;
+        let raw = response.first().and_then(|message| message.body()).ok_or_else(|| "Gmail returned no attachment data.".to_string())?;
+        let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
+        let part = part_at_path(&parsed, &row.part_path).ok_or_else(|| "The attachment structure changed. Reopen the email and try again.".to_string())?;
+        let bytes = part.get_body_raw().map_err(|e| e.to_string())?;
+        fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
+        let path = save_download(&downloads, &filename, &bytes)?;
+        session.logout().ok();
+        Ok::<_, String>(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(sqlx::FromRow)]
@@ -751,25 +873,29 @@ pub async fn prefetch_thread_bodies(
             let Some(message_id) = uid_to_id.get(&uid) else { continue; };
             let Some(raw) = response.body() else { continue; };
             let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
-            let (html, text, attachments) = extract_body_parts(&parsed);
-            bodies.push((message_id.clone(), html, text, attachments));
+            let (html, text, has_attachments) = extract_body_parts(&parsed);
+            let attachments = extract_attachment_metadata(&parsed);
+            bodies.push((message_id.clone(), html, text, has_attachments, attachments));
         }
         session.logout().ok();
         Ok::<_, String>(bodies)
     }).await.map_err(|e| e.to_string())??;
 
     let mut saved = 0;
-    for (message_id, body_html, body_text, has_attachments) in fetched {
+    for (message_id, body_html, body_text, has_attachments, attachments) in fetched {
         let result = sqlx::query(
             "UPDATE messages SET body_html = ?, body_text = ?, has_attachments = ?, body_fetched = 1 WHERE id = ? AND body_fetched = 0",
         )
         .bind(body_html)
         .bind(body_text)
         .bind(has_attachments as i64)
-        .bind(message_id)
+        .bind(&message_id)
         .execute(pool.inner())
         .await
         .map_err(|e| e.to_string())?;
+        if result.rows_affected() > 0 {
+            store_attachment_metadata(pool.inner(), &message_id, &attachments).await?;
+        }
         saved += result.rows_affected() as usize;
     }
     Ok(saved)
@@ -1443,6 +1569,81 @@ struct HtmlCandidate {
     // Standard HTML is safest to render in our sandbox. AMP/XHTML remains a
     // useful fallback for senders such as LinkedIn that omit text/html.
     is_standard_html: bool,
+}
+
+#[derive(Clone)]
+struct AttachmentMeta {
+    part_path: String,
+    filename: String,
+    content_type: String,
+    size_bytes: i64,
+}
+
+fn header_parameter(value: &str, name: &str) -> Option<String> {
+    value.split(';').skip(1).find_map(|parameter| {
+        let (key, value) = parameter.trim().split_once('=')?;
+        (key.trim().eq_ignore_ascii_case(name)).then(|| value.trim().trim_matches('"').to_string())
+    })
+}
+
+fn attachment_filename(mail: &mailparse::ParsedMail) -> Option<String> {
+    let disposition = mail.headers.get_first_value("Content-Disposition").unwrap_or_default();
+    let content_type = mail.headers.get_first_value("Content-Type").unwrap_or_default();
+    header_parameter(&disposition, "filename")
+        .or_else(|| header_parameter(&content_type, "name"))
+        .filter(|filename| !filename.trim().is_empty())
+}
+
+fn collect_attachment_metadata(mail: &mailparse::ParsedMail, path: &str, attachments: &mut Vec<AttachmentMeta>) {
+    if !mail.subparts.is_empty() {
+        for (index, part) in mail.subparts.iter().enumerate() {
+            let part_path = if path.is_empty() { (index + 1).to_string() } else { format!("{path}.{}", index + 1) };
+            collect_attachment_metadata(part, &part_path, attachments);
+        }
+        return;
+    }
+    let disposition = mail.headers.get_first_value("Content-Disposition").unwrap_or_default().to_lowercase();
+    let Some(filename) = attachment_filename(mail) else { return; };
+    if !disposition.contains("attachment") && !mail.ctype.mimetype.to_lowercase().starts_with("application/") {
+        return;
+    }
+    let size_bytes = mail.get_body_raw().map(|body| body.len() as i64).unwrap_or(0);
+    attachments.push(AttachmentMeta {
+        part_path: path.to_string(),
+        filename,
+        content_type: mail.ctype.mimetype.clone(),
+        size_bytes,
+    });
+}
+
+fn extract_attachment_metadata(mail: &mailparse::ParsedMail) -> Vec<AttachmentMeta> {
+    let mut attachments = Vec::new();
+    collect_attachment_metadata(mail, "", &mut attachments);
+    attachments
+}
+
+async fn store_attachment_metadata(pool: &SqlitePool, message_id: &str, attachments: &[AttachmentMeta]) -> Result<(), String> {
+    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM message_attachments WHERE message_id = ?")
+        .bind(message_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+    for attachment in attachments {
+        sqlx::query(
+            "INSERT INTO message_attachments (id, message_id, part_path, filename, content_type, size_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(format!("{message_id}:{}", attachment.part_path))
+        .bind(message_id)
+        .bind(&attachment.part_path)
+        .bind(&attachment.filename)
+        .bind(&attachment.content_type)
+        .bind(attachment.size_bytes)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    transaction.commit().await.map_err(|e| e.to_string())
 }
 
 fn decoded_body_lossy(mail: &mailparse::ParsedMail) -> String {

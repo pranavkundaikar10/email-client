@@ -2,9 +2,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, CalendarClock, MailOpen, Reply, Trash2, Sparkles, X } from "lucide-react";
+import { Archive, CalendarClock, Download, ExternalLink, MailOpen, Paperclip, Reply, Trash2, Sparkles, X } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
 import { useMailFlags } from "../../hooks/useMailFlags";
 import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
@@ -135,6 +135,12 @@ function formatFullDate(iso: string): string {
   });
 }
 
+function formatAttachmentSize(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function MessageCard({
   message, email, isLast, replyOpen, onReplyOpen, onReplyClose, replyAnchorRef,
 }: {
@@ -147,16 +153,29 @@ function MessageCard({
   replyAnchorRef?: { current: HTMLDivElement | null };
 }) {
   const queryClient = useQueryClient();
+  const addToast = useAppStore((s) => s.addToast);
 
   const { mutate: fetchBody, isPending, error: fetchError } = useMutation<Message, Error, boolean>({
     mutationFn: (force) => api.fetchMessageBody(email, message.id, force),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["messages", message.thread_id] });
+      queryClient.invalidateQueries({ queryKey: ["message_attachments", message.id] });
     },
   });
 
   const refreshedEmptyHtml = useRef(false);
   const refreshedInlineImages = useRef(false);
+  const refreshedAttachmentMetadata = useRef(false);
+  const [downloadedAttachments, setDownloadedAttachments] = useState<Record<string, string>>({});
+  const { data: attachments = [], isFetching: loadingAttachments } = useQuery({
+    queryKey: ["message_attachments", message.id],
+    queryFn: () => api.getMessageAttachments(message.id),
+    enabled: message.body_fetched && message.has_attachments,
+  });
+  const { mutate: downloadAttachment, isPending: downloadingAttachment } = useMutation({
+    mutationFn: (attachmentId: string) => api.downloadAttachment(email, attachmentId),
+    onSuccess: (path, attachmentId) => setDownloadedAttachments((current) => ({ ...current, [attachmentId]: path })),
+  });
   useEffect(() => {
     if (!isLast || isPending) return;
     if (!message.body_fetched) {
@@ -174,6 +193,13 @@ function MessageCard({
       fetchBody(true);
     }
   }, [isLast, isPending, message.body_fetched, message.body_html, message.body_text, fetchBody]);
+  useEffect(() => {
+    if (!message.body_fetched || !message.has_attachments || loadingAttachments || attachments.length > 0 || refreshedAttachmentMetadata.current) return;
+    // Older cached bodies predate attachment metadata. Refresh only this one
+    // message once so its on-demand download controls become available.
+    refreshedAttachmentMetadata.current = true;
+    fetchBody(true);
+  }, [attachments.length, fetchBody, loadingAttachments, message.body_fetched, message.has_attachments]);
 
   const toList = (() => {
     try { return (JSON.parse(message.to_emails) as string[]).join(", "); }
@@ -214,6 +240,30 @@ function MessageCard({
           </pre>
         ) : (
           <p className="text-xs text-gray-400 italic">No content</p>
+        )}
+        {(attachments.length > 0 || loadingAttachments) && (
+          <section className="mt-4 border-t border-gray-100 pt-3" aria-label="Attachments">
+            <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500"><Paperclip size={13} /> Attachments</p>
+            {loadingAttachments ? <p className="text-xs text-gray-400">Loading attachments…</p> : (
+              <div className="space-y-1.5">
+                {attachments.map((attachment) => {
+                  const path = downloadedAttachments[attachment.id];
+                  return <div key={attachment.id} className="flex min-w-0 items-center gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2">
+                    <Paperclip size={15} className="shrink-0 text-gray-400" />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-gray-700">{attachment.filename}</p>
+                      <p className="text-xs text-gray-400">{formatAttachmentSize(attachment.size_bytes)}</p>
+                    </div>
+                    {path ? (
+                      <button type="button" onClick={() => void openPath(path).catch(() => addToast("Could not open the downloaded attachment"))} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"><ExternalLink size={13} /> Open</button>
+                    ) : (
+                      <button type="button" disabled={downloadingAttachment} onClick={() => downloadAttachment(attachment.id)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"><Download size={13} /> {downloadingAttachment ? "Downloading…" : "Download"}</button>
+                    )}
+                  </div>;
+                })}
+              </div>
+            )}
+          </section>
         )}
       </div>
 

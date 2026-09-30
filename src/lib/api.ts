@@ -33,6 +33,15 @@ export interface Message {
   sent_at: string;
   unread: boolean;
   body_fetched: boolean;
+  has_attachments: boolean;
+}
+
+export interface EmailAttachment {
+  id: string;
+  message_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
 }
 
 export interface SplitRule {
@@ -198,6 +207,12 @@ export const api = {
 
   fetchMessageBody: (email: string, messageId: string, force = false) =>
     invoke<Message>("fetch_message_body", { email, messageId, force }),
+
+  getMessageAttachments: (messageId: string) =>
+    invoke<EmailAttachment[]>("get_message_attachments", { messageId }),
+
+  downloadAttachment: (email: string, attachmentId: string) =>
+    invoke<string>("download_attachment", { email, attachmentId }),
 
   prefetchThreadBodies: (email: string, threadIds: string[]) =>
     invoke<number>("prefetch_thread_bodies", { email, threadIds }),

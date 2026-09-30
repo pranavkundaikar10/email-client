@@ -8,7 +8,6 @@ type View = "inbox" | "starred" | "archive" | "search" | "sent" | "drafts" | "re
 
 interface Options {
   onViewChange: (view: View) => void;
-  onSearchFocus: () => void;
   splits?: { id: string; label: string }[];
   onSplitChange?: (id: string) => void;
   activeSplitId?: string | null;
@@ -17,7 +16,6 @@ interface Options {
 
 export function useKeyboardNav({
   onViewChange,
-  onSearchFocus,
   splits,
   onSplitChange,
   activeSplitId,
@@ -112,14 +110,20 @@ export function useKeyboardNav({
   }, { enableOnFormTags: false });
 
   // Match Superhuman's Split Inbox navigation: Tab moves right through Split
-  // Inboxes and Shift+Tab moves left. Scoped to the email workspace so text
-  // fields and open dialogs retain normal native focus traversal.
+  // Inboxes and Shift+Tab moves left. Elsewhere in the email workspace it is
+  // intentionally a no-op, rather than letting browser focus traversal land
+  // on thread controls. Text fields and open dialogs retain native Tab.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key !== "Tab" || !splitNavigationEnabled || !splits?.length || !onSplitChange) return;
+      if (e.key !== "Tab") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const target = e.target;
       if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return;
+
+      if (!splitNavigationEnabled || !splits?.length || !onSplitChange) {
+        e.preventDefault();
+        return;
+      }
 
       e.preventDefault();
       const currentIndex = splits.findIndex((split) => split.id === activeSplitId);
@@ -141,12 +145,6 @@ export function useKeyboardNav({
       return;
     }
     setSelectedThread(null);
-  }, { enableOnFormTags: false });
-
-  // / — search
-  useHotkeys("/", (e) => {
-    e.preventDefault();
-    onSearchFocus();
   }, { enableOnFormTags: false });
 
   // Cmd+K — command palette

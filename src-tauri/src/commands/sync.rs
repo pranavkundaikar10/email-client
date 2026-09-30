@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use imap::Session;
 use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
@@ -1478,10 +1479,11 @@ fn collect_body_parts(
     html_candidates: &mut Vec<HtmlCandidate>,
     text_candidates: &mut Vec<String>,
     has_attachments: &mut bool,
+    inline_images: &mut HashMap<String, String>,
 ) {
     if !mail.subparts.is_empty() {
         for part in &mail.subparts {
-            collect_body_parts(part, html_candidates, text_candidates, has_attachments);
+            collect_body_parts(part, html_candidates, text_candidates, has_attachments, inline_images);
         }
         return;
     }
@@ -1497,6 +1499,28 @@ fn collect_body_parts(
     // conservative review signal.
     if disposition.contains("attachment") {
         *has_attachments = true;
+        return;
+    }
+
+    // Embedded images are commonly referenced from email HTML as
+    // `src="cid:..."`. The isolated renderer cannot resolve those MIME-local
+    // URLs, so preserve small inline parts as data URLs instead. They are not
+    // remote loads and never expose the reader to the sender's image server.
+    if ct.starts_with("image/") {
+        if let Some(content_id) = mail.headers.get_first_value("Content-ID") {
+            let content_id = content_id.trim().trim_matches(['<', '>']);
+            if !content_id.is_empty() {
+                if let Ok(bytes) = mail.get_body_raw() {
+                    const MAX_INLINE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+                    if bytes.len() <= MAX_INLINE_IMAGE_BYTES {
+                        inline_images.insert(
+                            content_id.to_string(),
+                            format!("data:{ct};base64,{}", BASE64_STANDARD.encode(bytes)),
+                        );
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -1520,7 +1544,14 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
     let mut html_candidates = Vec::new();
     let mut text_candidates = Vec::new();
     let mut has_attachments = false;
-    collect_body_parts(mail, &mut html_candidates, &mut text_candidates, &mut has_attachments);
+    let mut inline_images = HashMap::new();
+    collect_body_parts(
+        mail,
+        &mut html_candidates,
+        &mut text_candidates,
+        &mut has_attachments,
+        &mut inline_images,
+    );
 
     // Prefer a meaningful standard text/html representation whenever present.
     // If a sender only supplies AMP HTML or XHTML, retain the best meaningful
@@ -1530,7 +1561,11 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
         .filter(|candidate| candidate.is_standard_html)
         .max_by_key(|candidate| html_visible_content_score(&candidate.body))
         .or_else(|| html_candidates.iter().max_by_key(|candidate| html_visible_content_score(&candidate.body)))
-        .map(|candidate| candidate.body.clone());
+        .map(|candidate| {
+            inline_images.iter().fold(candidate.body.clone(), |html, (content_id, data_url)| {
+                html.replace(&format!("cid:{content_id}"), data_url)
+            })
+        });
 
     let text = text_candidates
         .into_iter()

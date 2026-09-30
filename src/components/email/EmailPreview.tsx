@@ -156,6 +156,7 @@ function MessageCard({
   });
 
   const refreshedEmptyHtml = useRef(false);
+  const refreshedInlineImages = useRef(false);
   useEffect(() => {
     if (!isLast || isPending) return;
     if (!message.body_fetched) {
@@ -165,6 +166,11 @@ function MessageCard({
       // selection existed. This happens once and preserves the plain-text
       // fallback if the sender genuinely supplied no useful HTML.
       refreshedEmptyHtml.current = true;
+      fetchBody(true);
+    } else if (!refreshedInlineImages.current && /\bcid:/i.test(message.body_html ?? "")) {
+      // Cached messages from before inline MIME images were supported still
+      // contain unresolved cid: URLs. Re-fetch once to convert them locally.
+      refreshedInlineImages.current = true;
       fetchBody(true);
     }
   }, [isLast, isPending, message.body_fetched, message.body_html, message.body_text, fetchBody]);
@@ -353,11 +359,23 @@ function parseFollowUpTime(expression: string): Date | null {
 
   if (!date) {
     const weekdays = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-    const weekday = dateExpression.match(/^(?:next )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/);
+    // Accept the forms people naturally type into a compact command-style
+    // field. Convert only a complete weekday token, so partial input remains
+    // neutral until it is unambiguous.
+    const weekdayAliases: Record<string, string> = {
+      sun: "sunday", mon: "monday", tue: "tuesday", tues: "tuesday",
+      wed: "wednesday", thu: "thursday", thur: "thursday", thurs: "thursday",
+      fri: "friday", sat: "saturday",
+    };
+    const weekdayExpression = dateExpression.replace(
+      /^(next )?([a-z]+)$/,
+      (_match, prefix: string | undefined, name: string) => `${prefix ?? ""}${weekdayAliases[name] ?? name}`,
+    );
+    const weekday = weekdayExpression.match(/^(?:next )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/);
     if (weekday) {
       const target = weekdays.indexOf(weekday[1]);
       let days = (target - now.getDay() + 7) % 7;
-      if (dateExpression.startsWith("next ")) days += 7;
+      if (weekdayExpression.startsWith("next ")) days += 7;
       else if (days === 0) days = 7;
       date = new Date(now);
       date.setDate(date.getDate() + days);
@@ -412,6 +430,22 @@ function followUpTone(dueAt: string) {
 
 function getFollowUpSuggestions(expression: string): FollowUpSuggestion[] {
   const parsed = parseFollowUpTime(expression);
+  const normalized = expression.trim().toLowerCase().replace(/\s+/g, " ");
+  const weekdayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const weekdayPrefix = normalized.match(/^(next )?([a-z]{1,8})$/);
+  const weekdaySuggestions = weekdayPrefix
+    ? weekdayNames
+        .filter((weekday) => weekday.startsWith(weekdayPrefix[2]))
+        .flatMap((weekday) => {
+          const suggestionExpression = `${weekdayPrefix[1] ?? ""}${weekday}`;
+          const dueAt = parseFollowUpTime(suggestionExpression);
+          return dueAt ? [{
+            expression: suggestionExpression,
+            dueAt,
+            label: `${weekdayPrefix[1] ? "Next " : ""}${weekday[0].toUpperCase()}${weekday.slice(1)}`,
+          }] : [];
+        })
+    : [];
   const presets = [
     ["tomorrow 9am", "Tomorrow morning"],
     ["tomorrow 2pm", "Tomorrow afternoon"],
@@ -432,9 +466,10 @@ function getFollowUpSuggestions(expression: string): FollowUpSuggestion[] {
     return [{ expression: preset, dueAt, label }];
   });
 
-  if (!parsed || !expression.trim()) return presetSuggestions;
+  if (!parsed || !expression.trim()) return [...weekdaySuggestions, ...presetSuggestions];
   return [
     { expression, dueAt: parsed, label: "Schedule" },
+    ...weekdaySuggestions.filter((suggestion) => suggestion.dueAt.getTime() !== parsed.getTime()),
     ...presetSuggestions.filter((suggestion) => suggestion.dueAt.getTime() !== parsed.getTime()),
   ];
 }

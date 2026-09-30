@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use tauri::{AppHandle, Manager};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const LEGACY_APP_IDENTIFIER: &str = "com.pranavkundaikar.tmpemail-client-scaffold";
 
@@ -89,6 +90,76 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(pool)
+}
+
+/// Converts legacy email-address account IDs to stable UUIDs. All affected
+/// rows are migrated together before the application starts any sync workers.
+/// A one-time backup is retained beside the database before changing existing
+/// data so the original local state remains recoverable.
+pub async fn normalize_account_ids(app: &AppHandle, pool: &SqlitePool) -> Result<(), String> {
+    let accounts: Vec<(String, String)> = sqlx::query_as("SELECT id, email FROM accounts")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let migrations: Vec<(String, String)> = accounts
+        .into_iter()
+        .filter(|(id, _)| Uuid::parse_str(id).is_err())
+        .map(|(old_id, email)| {
+            let new_id = crate::commands::auth::account_id_for_email(app, &email)
+                .unwrap_or_else(|_| Uuid::new_v4().to_string());
+            (old_id, new_id)
+        })
+        .collect();
+    if migrations.is_empty() {
+        return Ok(());
+    }
+
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let backup = data_dir.join("mail.before-account-id-migration.db");
+    let quote_sql_path = |path: &Path| path.to_string_lossy().replace('\'', "''");
+    let mut connection = pool.acquire().await.map_err(|e| e.to_string())?;
+    if !backup.exists() {
+        sqlx::query(&format!("VACUUM INTO '{}'", quote_sql_path(&backup)))
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| format!("Could not back up mail data before account migration: {e}"))?;
+    }
+
+    // Updating a primary key and its children requires temporarily disabling
+    // SQLite's immediate FK checks; all references are updated in one
+    // transaction and checks are restored before returning.
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| e.to_string())?;
+    let migration_result = async {
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        for (old_id, new_id) in &migrations {
+            for table in ["threads", "messages", "mail_operations", "mail_flag_operations"] {
+                sqlx::query(&format!("UPDATE {table} SET account_id = ? WHERE account_id = ?"))
+                    .bind(new_id)
+                    .bind(old_id)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            sqlx::query("UPDATE accounts SET id = ? WHERE id = ?")
+                .bind(new_id)
+                .bind(old_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        sqlx::query("COMMIT").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    }.await;
+    if migration_result.is_err() {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    }
+    let restore_result = sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *connection).await;
+    migration_result?;
+    restore_result.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Completes the identifier migration for installations where the renamed app

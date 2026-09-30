@@ -42,6 +42,10 @@ struct CredentialsStore {
 
 #[derive(Serialize, Deserialize)]
 struct StoredAccount {
+    /// Stable local identity used by the database. Older credential stores did
+    /// not have this field, so it is populated during startup migration.
+    #[serde(default)]
+    id: String,
     email: String,
     #[serde(default)]
     password: String,
@@ -183,13 +187,48 @@ pub async fn get_gmail_auth(app: &AppHandle, email: &str) -> Result<GmailAuth, S
     let account = load_store(app)?
         .accounts
         .into_iter()
-        .find(|account| account.email == email)
+        .find(|account| account.email == email || account.id == email)
         .ok_or_else(|| format!("No credentials found for {email}"))?;
 
     match account.auth_kind {
         AuthKind::AppPassword => Ok(GmailAuth::AppPassword(account.password)),
-        AuthKind::GoogleOAuth => Ok(GmailAuth::OAuthAccessToken(access_token_for(email).await?)),
+        AuthKind::GoogleOAuth => Ok(GmailAuth::OAuthAccessToken(access_token_for(&account.email).await?)),
     }
+}
+
+/// Adds stable IDs to credential stores created before account contexts were
+/// introduced. This is intentionally idempotent and does not touch secrets.
+pub fn ensure_account_ids(app: &AppHandle) -> Result<(), String> {
+    let mut store = load_store(app)?;
+    let mut changed = false;
+    for account in &mut store.accounts {
+        if Uuid::parse_str(&account.id).is_err() {
+            account.id = Uuid::new_v4().to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        save_store(app, &store)?;
+    }
+    Ok(())
+}
+
+pub fn account_id_for_email(app: &AppHandle, email: &str) -> Result<String, String> {
+    load_store(app)?
+        .accounts
+        .into_iter()
+        .find(|account| account.email == email)
+        .map(|account| account.id)
+        .ok_or_else(|| format!("No account found for {email}"))
+}
+
+pub fn account_email_for_id(app: &AppHandle, account_id: &str) -> Result<String, String> {
+    load_store(app)?
+        .accounts
+        .into_iter()
+        .find(|account| account.id == account_id || account.email == account_id)
+        .map(|account| account.email)
+        .ok_or_else(|| format!("No account found for {account_id}"))
 }
 
 async fn access_token_for(email: &str) -> Result<String, String> {
@@ -362,8 +401,16 @@ pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, Str
     .map_err(|e| e.to_string())??;
 
     let mut store = load_store(&app)?;
+    let existing_id = store
+        .accounts
+        .iter()
+        .find(|account| account.email == user.email)
+        .map(|account| account.id.clone())
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     store.accounts.retain(|account| account.email != user.email);
     store.accounts.push(StoredAccount {
+        id: existing_id,
         email: user.email.clone(),
         password: String::new(),
         auth_kind: AuthKind::GoogleOAuth,
@@ -466,8 +513,16 @@ pub async fn add_account(
     crate::commands::sync::test_imap_connection(&email, &GmailAuth::AppPassword(password.clone()))
         .await?;
     let mut store = load_store(&app)?;
+    let existing_id = store
+        .accounts
+        .iter()
+        .find(|account| account.email == email)
+        .map(|account| account.id.clone())
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     store.accounts.retain(|account| account.email != email);
     store.accounts.push(StoredAccount {
+        id: existing_id,
         email: email.clone(),
         password,
         auth_kind: AuthKind::AppPassword,

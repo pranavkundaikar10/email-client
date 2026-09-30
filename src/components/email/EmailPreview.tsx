@@ -242,22 +242,25 @@ function MessageCard({
           <p className="text-xs text-gray-400 italic">No content</p>
         )}
         {(attachments.length > 0 || loadingAttachments) && (
-          <section className="mt-4 border-t border-gray-100 pt-3" aria-label="Attachments">
-            <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500"><Paperclip size={13} /> Attachments</p>
+          <section className="mt-5 border-t border-gray-100 pt-3" aria-label="Attachments">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-gray-500"><Paperclip size={13} className="text-gray-400" /> Attachments{attachments.length > 0 && <span className="text-gray-400">· {attachments.length}</span>}</div>
             {loadingAttachments ? <p className="text-xs text-gray-400">Loading attachments…</p> : (
-              <div className="space-y-1.5">
+              <div className="divide-y divide-gray-100">
                 {attachments.map((attachment) => {
                   const path = downloadedAttachments[attachment.id];
-                  return <div key={attachment.id} className="flex min-w-0 items-center gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2">
+                  return <div key={attachment.id} className="flex min-w-0 items-center gap-2.5 px-1 py-2.5">
                     <Paperclip size={15} className="shrink-0 text-gray-400" />
-                    <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-1 items-baseline gap-2">
                       <p className="truncate text-sm font-medium text-gray-700">{attachment.filename}</p>
-                      <p className="text-xs text-gray-400">{formatAttachmentSize(attachment.size_bytes)}</p>
+                      <p className="shrink-0 text-xs text-gray-400">{formatAttachmentSize(attachment.size_bytes)}</p>
                     </div>
                     {path ? (
-                      <button type="button" onClick={() => void openPath(path).catch(() => addToast("Could not open the downloaded attachment"))} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"><ExternalLink size={13} /> Open</button>
+                      <div className="flex shrink-0 items-center gap-3">
+                        <button type="button" onClick={() => void openPath(path).catch(() => addToast("Could not open the downloaded attachment"))} className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-950"><ExternalLink size={13} /> Open</button>
+                        <button type="button" disabled={downloadingAttachment} onClick={() => downloadAttachment(attachment.id)} className="text-xs font-medium text-gray-400 hover:text-gray-700 disabled:opacity-50">Download again</button>
+                      </div>
                     ) : (
-                      <button type="button" disabled={downloadingAttachment} onClick={() => downloadAttachment(attachment.id)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"><Download size={13} /> {downloadingAttachment ? "Downloading…" : "Download"}</button>
+                      <button type="button" disabled={downloadingAttachment} onClick={() => downloadAttachment(attachment.id)} className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-950 disabled:opacity-50"><Download size={13} /> {downloadingAttachment ? "Downloading…" : "Download"}</button>
                     )}
                   </div>;
                 })}

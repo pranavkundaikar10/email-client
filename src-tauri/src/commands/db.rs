@@ -279,6 +279,16 @@ pub struct MessageRow {
     pub sent_at: String,
     pub unread: bool,
     pub body_fetched: bool,
+    pub has_attachments: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
+pub struct AttachmentRow {
+    pub id: String,
+    pub message_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
 }
 
 #[tauri::command]
@@ -370,13 +380,27 @@ pub async fn get_messages(
                COALESCE(to_emails, '[]') AS to_emails,
                COALESCE(cc_emails, '[]') AS cc_emails,
                subject,
-               body_html, body_text, sent_at, unread, body_fetched
+               body_html, body_text, sent_at, unread, body_fetched, has_attachments
         FROM messages
         WHERE thread_id = ?
         ORDER BY sent_at ASC
         "#,
     )
     .bind(thread_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_message_attachments(
+    pool: tauri::State<'_, SqlitePool>,
+    message_id: String,
+) -> Result<Vec<AttachmentRow>, String> {
+    sqlx::query_as::<_, AttachmentRow>(
+        "SELECT id, message_id, filename, content_type, size_bytes FROM message_attachments WHERE message_id = ? ORDER BY filename",
+    )
+    .bind(message_id)
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())

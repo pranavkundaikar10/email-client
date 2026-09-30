@@ -344,14 +344,14 @@ fn fetch_older_headers(email: &str, auth: &GmailAuth, before_imap_date: &str) ->
     Ok(metas)
 }
 
-async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: Vec<MessageMeta>) -> Result<usize, String> {
+async fn write_metas_to_db(pool: &SqlitePool, account_id: &str, email: &str, folder: &str, metas: Vec<MessageMeta>) -> Result<usize, String> {
     let count = metas.len();
     if count == 0 { return Ok(0); }
 
     let split_rows = crate::commands::splits::load_splits(pool).await?;
 
     sqlx::query("INSERT OR IGNORE INTO accounts (id, email, provider) VALUES (?, ?, 'gmail')")
-        .bind(email)
+        .bind(account_id)
         .bind(email)
         .execute(pool)
         .await
@@ -376,7 +376,7 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
                 unread          = MIN(threads.unread, excluded.unread)
             "#,
         )
-        .bind(&m.thread_id).bind(email).bind(&m.subject).bind(&m.snippet)
+        .bind(&m.thread_id).bind(account_id).bind(&m.subject).bind(&m.snippet)
         .bind(m.unread as i64).bind(m.starred as i64).bind(&m.received_at).bind(&category).bind(folder)
         .execute(&mut *tx)
         .await
@@ -394,7 +394,7 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
                 sent_at = excluded.sent_at
             "#,
         )
-        .bind(&m.message_id).bind(&m.thread_id).bind(email)
+        .bind(&m.message_id).bind(&m.thread_id).bind(account_id)
         .bind(&m.from_email).bind(&m.from_name).bind(&m.to_emails).bind(&m.subject).bind(&m.received_at)
         .bind(m.unread as i64).bind(&m.imap_uid).bind(m.is_newsletter as i64)
         .execute(&mut *tx)
@@ -417,7 +417,7 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
     sqlx::query(
         "UPDATE threads SET last_message_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = threads.id) WHERE account_id = ? AND folder = ?",
     )
-    .bind(email)
+    .bind(account_id)
     .bind(folder)
     .execute(&mut *tx)
     .await
@@ -431,7 +431,7 @@ async fn write_metas_to_db(pool: &SqlitePool, email: &str, folder: &str, metas: 
 // Threads whose IMAP UIDs are all absent from `current_inbox_uids` were archived/deleted on Gmail.
 async fn reconcile_removed(
     pool: &SqlitePool,
-    email: &str,
+    account_id: &str,
     since_date: &str,
     current_inbox_uids: std::collections::HashSet<u32>,
 ) -> Result<(), String> {
@@ -441,7 +441,7 @@ async fn reconcile_removed(
          WHERE t.account_id = ? AND t.folder = 'inbox' AND t.archived = 0
            AND t.last_message_at >= ?",
     )
-    .bind(email)
+    .bind(account_id)
     .bind(since_date)
     .fetch_all(pool)
     .await
@@ -485,6 +485,7 @@ pub async fn sync_inbox(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
     let is_oauth = matches!(auth, GmailAuth::OAuthAccessToken(_));
@@ -508,8 +509,8 @@ pub async fn sync_inbox(
         Err(error) => return Err(error),
     };
 
-    let count = write_metas_to_db(pool.inner(), &email, "inbox", metas).await?;
-    reconcile_removed(pool.inner(), &email, &db_since, inbox_uids).await?;
+    let count = write_metas_to_db(pool.inner(), &account_id, &email, "inbox", metas).await?;
+    reconcile_removed(pool.inner(), &account_id, &db_since, inbox_uids).await?;
     Ok(count)
 }
 
@@ -520,6 +521,7 @@ pub async fn sync_older(
     email: String,
     before_date: String,
 ) -> Result<usize, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
 
@@ -536,7 +538,7 @@ pub async fn sync_older(
     .await
     .map_err(|e| e.to_string())??;
 
-    write_metas_to_db(pool.inner(), &email, "inbox", metas).await
+    write_metas_to_db(pool.inner(), &account_id, &email, "inbox", metas).await
 }
 
 #[tauri::command]
@@ -545,6 +547,7 @@ pub async fn sync_sent(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
     let metas = tokio::task::spawn_blocking(move || {
@@ -552,7 +555,7 @@ pub async fn sync_sent(
     })
     .await
     .map_err(|e| e.to_string())??;
-    write_metas_to_db(pool.inner(), &email, "sent", metas).await
+    write_metas_to_db(pool.inner(), &account_id, &email, "sent", metas).await
 }
 
 #[tauri::command]
@@ -561,6 +564,7 @@ pub async fn sync_drafts(
     pool: tauri::State<'_, SqlitePool>,
     email: String,
 ) -> Result<usize, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
     let metas = tokio::task::spawn_blocking(move || {
@@ -568,7 +572,7 @@ pub async fn sync_drafts(
     })
     .await
     .map_err(|e| e.to_string())??;
-    write_metas_to_db(pool.inner(), &email, "drafts", metas).await
+    write_metas_to_db(pool.inner(), &account_id, &email, "drafts", metas).await
 }
 
 
@@ -697,6 +701,7 @@ pub async fn prefetch_thread_bodies(
     email: String,
     thread_ids: Vec<String>,
 ) -> Result<usize, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let thread_ids: Vec<String> = thread_ids.into_iter().take(3).collect();
     if thread_ids.is_empty() { return Ok(0); }
 
@@ -716,7 +721,7 @@ pub async fn prefetch_thread_bodies(
     );
     let mut query = sqlx::query_as::<_, PrefetchMessageRow>(&sql);
     for thread_id in &thread_ids { query = query.bind(thread_id); }
-    let mut rows = query.bind(&email).fetch_all(pool.inner()).await.map_err(|e| e.to_string())?;
+    let mut rows = query.bind(&account_id).fetch_all(pool.inner()).await.map_err(|e| e.to_string())?;
     let Some(first) = rows.first() else { return Ok(0); };
 
     // A sidebar normally contains one folder. Search can mix folders, so only
@@ -728,7 +733,7 @@ pub async fn prefetch_thread_bodies(
         .collect();
     if uid_to_id.is_empty() { return Ok(0); }
 
-    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
+    let auth = crate::commands::auth::get_gmail_auth(&app, &account_id).await?;
     let uid_set = uid_to_id.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
     let fetched = tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &auth)?;
@@ -841,7 +846,7 @@ async fn imap_move_thread(
         .unwrap_or_else(|| "inbox".to_string());
 
     let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
-    let email = account_id.clone();
+    let email = crate::commands::auth::account_email_for_id(app, &account_id)?;
 
     tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &auth)?;
@@ -1098,9 +1103,10 @@ async fn imap_sync_thread_flags(
     .await
     .map_err(|e| e.to_string())?;
     let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
+    let email = crate::commands::auth::account_email_for_id(app, &account_id)?;
 
     tokio::task::spawn_blocking(move || {
-        let mut session = connect(&account_id, &auth)?;
+        let mut session = connect(&email, &auth)?;
         let mailbox = match folder.as_str() {
             "sent" => find_special_mailbox(&mut session, "\\Sent")
                 .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),

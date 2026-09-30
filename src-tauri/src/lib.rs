@@ -24,6 +24,18 @@ pub fn run() {
                 if let Err(error) = db::merge_legacy_app_data(&app_handle, &pool).await {
                     eprintln!("Could not merge legacy application data: {error}");
                 }
+                match auth::ensure_account_ids(&app_handle) {
+                    Ok(()) => {
+                        if let Err(error) = db::normalize_account_ids(&app_handle, &pool).await {
+                            eprintln!("Could not migrate local account IDs: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        // Keep the existing database untouched if the linked
+                        // credential store cannot be read or safely updated.
+                        eprintln!("Could not assign stable account IDs: {error}");
+                    }
+                }
                 app_handle.manage(pool.clone());
                 tauri::async_runtime::spawn(async move {
                     let _ = sync::process_mail_operations(&app_handle, &pool, &worker_for_startup).await;

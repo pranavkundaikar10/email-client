@@ -45,6 +45,8 @@ export default function SplitsSettings({ onClose }: Props) {
   const [activeSection, setActiveSection] = useState<SettingsSection>("ai");
   const saveNoticeTimer = useRef<number | undefined>(undefined);
   const skipNextSplitAutosave = useRef(false);
+  const splitRevision = useRef(0);
+  const splitSaveChain = useRef(Promise.resolve());
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -118,7 +120,8 @@ export default function SplitsSettings({ onClose }: Props) {
   const effective = splits ?? rawSplits.map(parseSplit);
 
   function setEffective(fn: (prev: LocalSplit[]) => LocalSplit[]) {
-    setSplits(fn(effective));
+    splitRevision.current += 1;
+    setSplits((previous) => fn(previous ?? rawSplits.map(parseSplit)));
   }
 
   // ── split-level actions ──────────────────────────────────────────────────
@@ -207,7 +210,7 @@ export default function SplitsSettings({ onClose }: Props) {
     }
   }, []);
 
-  const persistSplits = useCallback(async (snapshot: LocalSplit[]) => {
+  const persistSplits = useCallback(async (snapshot: LocalSplit[], revision: number) => {
       const existing = new Set(rawSplits.map((s) => s.id));
       const kept = new Set(snapshot.map((s) => s.id));
 
@@ -232,8 +235,12 @@ export default function SplitsSettings({ onClose }: Props) {
 
       await api.reorderSplits(finalIds);
       await api.recategorizeThreads();
-      skipNextSplitAutosave.current = true;
-      setSplits(persisted);
+      // Do not replace text the user has typed while this older save was in
+      // flight. The later revision is queued immediately after this one.
+      if (splitRevision.current === revision) {
+        skipNextSplitAutosave.current = true;
+        setSplits(persisted);
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["splits"] }),
         queryClient.invalidateQueries({ queryKey: ["threads"] }),
@@ -262,7 +269,12 @@ export default function SplitsSettings({ onClose }: Props) {
       return;
     }
     const snapshot = splits;
-    const timer = window.setTimeout(() => { void runSave(() => persistSplits(snapshot)); }, 700);
+    const revision = splitRevision.current;
+    const timer = window.setTimeout(() => {
+      splitSaveChain.current = splitSaveChain.current
+        .catch(() => undefined)
+        .then(() => runSave(() => persistSplits(snapshot, revision)));
+    }, 700);
     return () => window.clearTimeout(timer);
   }, [persistSplits, runSave, splits]);
 
@@ -509,7 +521,6 @@ export default function SplitsSettings({ onClose }: Props) {
                         onChange={(e) =>
                           updateRule(split.id, rIdx, {
                             type: e.target.value as SplitRule["type"],
-                            value: undefined,
                           })
                         }
                         className="text-xs border border-gray-200 rounded px-2 py-1 outline-none flex-shrink-0"

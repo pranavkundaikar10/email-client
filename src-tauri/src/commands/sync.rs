@@ -6,11 +6,11 @@ use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use chrono::NaiveDateTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -28,6 +28,8 @@ const MAX_OPERATION_ATTEMPTS: i64 = 3;
 // Gmail changes are intentionally held briefly so the client can offer a
 // reliable Undo action before any remote state is changed.
 const OPERATION_UNDO_WINDOW_SECONDS: i64 = 8;
+const IMAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Ensures Gmail-changing operations run one at a time, even when several
 /// buttons or keyboard shortcuts are pressed in quick succession.
@@ -108,9 +110,28 @@ fn is_newsletter(headers: &mailparse::ParsedMail) -> bool {
 
 fn connect(email: &str, auth: &GmailAuth) -> Result<ImapSession, String> {
     let tls = TlsConnector::new().map_err(|e| e.to_string())?;
-    let client =
-        imap::connect((GMAIL_IMAP_HOST, GMAIL_IMAP_PORT), GMAIL_IMAP_HOST, &tls)
-            .map_err(|e| e.to_string())?;
+    // A laptop waking from sleep can retain a half-open network socket. The
+    // library helper uses unbounded TCP operations, which can leave the
+    // periodic sync marked in-progress forever. Bound every connection so the
+    // caller can return an error and its normal retry path can recover.
+    let address = (GMAIL_IMAP_HOST, GMAIL_IMAP_PORT)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or_else(|| "Could not resolve imap.gmail.com".to_string())?;
+    let stream = TcpStream::connect_timeout(&address, IMAP_CONNECT_TIMEOUT)
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(IMAP_COMMAND_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(IMAP_COMMAND_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    let tls_stream = tls
+        .connect(GMAIL_IMAP_HOST, stream)
+        .map_err(|e| e.to_string())?;
+    let mut client = imap::Client::new(tls_stream);
+    client.read_greeting().map_err(|e| e.to_string())?;
     match auth {
         GmailAuth::AppPassword(password) => client.login(email, password).map_err(|(e, _)| e.to_string()),
         GmailAuth::OAuthAccessToken(token) => {
@@ -203,9 +224,19 @@ fn fetch_headers_query(
     imap_query: &str,
     limit: usize,
 ) -> Result<(Vec<MessageMeta>, std::collections::HashSet<u32>), String> {
+    let older_sync = imap_query.starts_with("BEFORE ");
+    if older_sync {
+        eprintln!("Older email sync: connecting to Gmail IMAP");
+    }
     let mut session = connect(email, auth)?;
+    if older_sync {
+        eprintln!("Older email sync: connected; selecting Inbox");
+    }
     session.select("INBOX").map_err(|e| e.to_string())?;
 
+    if older_sync {
+        eprintln!("Older email sync: searching Gmail with {imap_query}");
+    }
     let search_result = session
         .uid_search(imap_query)
         .map_err(|e| e.to_string())?;
@@ -214,6 +245,9 @@ fn fetch_headers_query(
     let all_inbox_uids: std::collections::HashSet<u32> = search_result.iter().cloned().collect();
 
     if search_result.is_empty() {
+        if older_sync {
+            eprintln!("Older email sync: Gmail found no older messages");
+        }
         session.logout().ok();
         return Ok((vec![], all_inbox_uids));
     }
@@ -221,6 +255,9 @@ fn fetch_headers_query(
     let mut uids: Vec<u32> = search_result.into_iter().collect();
     uids.sort_unstable_by(|a, b| b.cmp(a));
     uids.truncate(limit);
+    if older_sync {
+        eprintln!("Older email sync: Gmail found {} messages; fetching {} headers", all_inbox_uids.len(), uids.len());
+    }
 
     let uid_set = uids
         .iter()
@@ -235,6 +272,9 @@ fn fetch_headers_query(
         .map_err(|e| e.to_string())?;
 
     let result = parse_fetched_messages(&messages);
+    if older_sync {
+        eprintln!("Older email sync: received {} message headers", result.len());
+    }
     session.logout().ok();
     Ok((result, all_inbox_uids))
 }
@@ -522,26 +562,34 @@ pub async fn sync_inbox(
 pub async fn sync_older(
     app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
-    email: String,
+    account_id: String,
     before_date: String,
 ) -> Result<usize, String> {
-    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
+    eprintln!("Older email sync: resolving account");
+    let email = crate::commands::auth::account_email_for_id(&app, &account_id)?;
+    eprintln!("Older email sync: refreshing Gmail credentials");
     let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
     let email_for_imap = email.clone();
 
-    // Parse SQLite timestamp and reformat as IMAP date (DD-Mon-YYYY)
-    let imap_date = NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%d %H:%M:%S"))
-        .map(|dt| dt.format("%d-%b-%Y").to_string())
-        .unwrap_or_else(|_| before_date.chars().take(10).collect::<String>()
-            .replace('-', "-")); // fallback: keep YYYY-MM-DD as-is (won't match but won't crash)
+    // Gmail's INTERNALDATE is persisted as RFC 3339. IMAP's BEFORE search
+    // predicate instead requires a DD-Mon-YYYY date, so normalize both the
+    // current RFC 3339 form and legacy SQLite timestamp formats explicitly.
+    let imap_date = DateTime::parse_from_rfc3339(&before_date)
+        .map(|date| date.with_timezone(&Utc).format("%d-%b-%Y").to_string())
+        .or_else(|_| NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%dT%H:%M:%S")
+            .map(|date| date.format("%d-%b-%Y").to_string()))
+        .or_else(|_| NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%d %H:%M:%S")
+            .map(|date| date.format("%d-%b-%Y").to_string()))
+        .map_err(|_| format!("Could not determine the date for older email sync: {before_date}"))?;
 
-    let metas = tokio::task::spawn_blocking(move || {
+    let metas = tokio::time::timeout(Duration::from_secs(45), tokio::task::spawn_blocking(move || {
         fetch_older_headers(&email_for_imap, &auth, &imap_date)
-    })
+    }))
     .await
+    .map_err(|_| "Older email sync timed out after 45 seconds while contacting Gmail".to_string())?
     .map_err(|e| e.to_string())??;
 
+    eprintln!("Older email sync: writing {} messages to the local database", metas.len());
     write_metas_to_db(pool.inner(), &account_id, &email, "inbox", metas).await
 }
 
@@ -588,6 +636,7 @@ pub async fn fetch_message_body(
     message_id: String,
     force: Option<bool>,
 ) -> Result<crate::commands::db::MessageRow, String> {
+    let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     // Use i64 for body_fetched — SQLite stores booleans as INTEGER
     let row: Option<(i64, String)> = sqlx::query_as(
         "SELECT body_fetched, imap_uid FROM messages WHERE id = ?",
@@ -609,7 +658,7 @@ pub async fn fetch_message_body(
             .map_err(|e| e.to_string())?;
 
     if body_fetched && !force.unwrap_or(false) {
-        let messages = crate::commands::db::get_messages(pool, thread_id).await?;
+        let messages = crate::commands::db::get_messages(pool, account_id.clone(), thread_id).await?;
         return messages
             .into_iter()
             .find(|m| m.id == message_id)
@@ -684,7 +733,7 @@ pub async fn fetch_message_body(
     .map_err(|e| e.to_string())?;
     store_attachment_metadata(pool.inner(), &message_id_clone, &attachments).await?;
 
-    let messages = crate::commands::db::get_messages(pool, thread_id).await?;
+    let messages = crate::commands::db::get_messages(pool, account_id, thread_id).await?;
     messages
         .into_iter()
         .find(|m| m.id == message_id_clone)

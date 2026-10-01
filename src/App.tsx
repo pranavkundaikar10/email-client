@@ -116,6 +116,10 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryKey: ["account_profile", email],
     queryFn: () => api.getAccountProfile(email),
   });
+  const { data: accountContext } = useQuery({
+    queryKey: ["account_context", email],
+    queryFn: () => api.getAccountContext(email),
+  });
   const { data: aiAssistanceSettings = { enabled: false } } = useQuery({
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
@@ -172,9 +176,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
 
   // Search results
   const { data: searchResults = [] } = useQuery({
-    queryKey: ["search", searchQuery],
-    queryFn: () => api.searchThreads(searchQuery),
-    enabled: searchQuery.length > 1,
+    queryKey: ["search", accountContext?.id ?? "", searchQuery],
+    queryFn: () => api.searchThreads(accountContext!.id, searchQuery),
+    enabled: searchQuery.length > 1 && Boolean(accountContext?.id),
     staleTime: 5_000,
   });
 
@@ -410,11 +414,13 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
             />
 
             {isSearching ? <ThreadList
+              accountId={accountContext?.id ?? ""}
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
               isSearching
             /> : activeView === "review" ? <ReviewList /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
+              accountId={accountContext?.id ?? ""}
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
@@ -423,7 +429,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           </div>
 
           {/* Email preview */}
-          <EmailPreview email={email} reviewMode={activeView === "review" && !isSearching} followUpMode={activeView === "follow_ups" && !isSearching} />
+          <EmailPreview email={email} accountId={accountContext?.id ?? ""} reviewMode={activeView === "review" && !isSearching} followUpMode={activeView === "follow_ups" && !isSearching} />
 
         </div>{/* end thread list + email preview row */}
       </div>{/* end right content column */}
@@ -442,6 +448,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       {/* Command palette */}
       {commandPaletteOpen && (
         <CommandPalette
+          accountId={accountContext?.id ?? ""}
           onViewChange={changeView}
           onClose={() => setCommandPaletteOpen(false)}
           splits={splitDefs}

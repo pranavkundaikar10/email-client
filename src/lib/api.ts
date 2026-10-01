@@ -114,6 +114,12 @@ export interface AccountProfile {
   profile_picture: string | null;
 }
 
+export interface AccountContext {
+  id: string;
+  email: string;
+  provider: string;
+}
+
 export interface ThinkingSettings {
   manual: boolean;
   background: boolean;
@@ -146,6 +152,9 @@ export const api = {
   getAccountProfile: (email: string) =>
     invoke<AccountProfile>("get_account_profile", { email }),
 
+  getAccountContext: (email: string) =>
+    invoke<AccountContext>("get_account_context", { email }),
+
   connectGoogleAccount: () => invoke<string>("connect_google_account"),
 
   addAccount: (email: string, password: string) =>
@@ -154,11 +163,11 @@ export const api = {
   removeAccount: (email: string) =>
     invoke<void>("remove_account", { email }),
 
-  getThreads: (limit = 50, offset = 0, view = "inbox", category?: string) =>
-    invoke<Thread[]>("get_threads", { limit, offset, view, category }),
+  getThreads: (accountId: string, limit = 50, offset = 0, view = "inbox", category?: string) =>
+    invoke<Thread[]>("get_threads", { accountId, limit, offset, view, category }),
 
-  getMessages: (threadId: string) =>
-    invoke<Message[]>("get_messages", { threadId: threadId }),
+  getMessages: (accountId: string, threadId: string) =>
+    invoke<Message[]>("get_messages", { accountId, threadId }),
 
   markThreadRead: (threadId: string) =>
     invoke<void>("mark_thread_read", { threadId: threadId }),
@@ -181,8 +190,8 @@ export const api = {
   starThread: (threadId: string, starred: boolean) =>
     invoke<void>("star_thread", { threadId, starred }),
 
-  searchThreads: (query: string) =>
-    invoke<Thread[]>("search_threads", { query }),
+  searchThreads: (accountId: string, query: string) =>
+    invoke<Thread[]>("search_threads", { accountId, query }),
 
   getUnreadCounts: () =>
     invoke<Record<string, number>>("get_unread_counts"),
@@ -190,8 +199,8 @@ export const api = {
   syncInbox: (email: string) =>
     invoke<number>("sync_inbox", { email }),
 
-  syncOlder: (email: string, beforeDate: string) =>
-    invoke<number>("sync_older", { email, beforeDate }),
+  syncOlder: (accountId: string, beforeDate: string) =>
+    invoke<number>("sync_older", { accountId, beforeDate }),
 
   syncSent: (email: string) =>
     invoke<number>("sync_sent", { email }),

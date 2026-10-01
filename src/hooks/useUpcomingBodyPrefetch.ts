@@ -8,7 +8,7 @@ const IMMEDIATE_PREFETCH_COUNT = 2;
 const IDLE_DELAY_MS = 75;
 
 /** Warm SQLite and TanStack caches for the next visible emails without changing Gmail state. */
-export function useUpcomingBodyPrefetch(email: string) {
+export function useUpcomingBodyPrefetch(email: string, accountId: string) {
   const selectedThreadId = useAppStore((state) => state.selectedThreadId);
   const threads = useAppStore((state) => state.threads);
   const queryClient = useQueryClient();
@@ -28,8 +28,8 @@ export function useUpcomingBodyPrefetch(email: string) {
       await api.prefetchThreadBodies(email, ids);
       if (cancelled) return;
       await Promise.all(ids.map((threadId) => queryClient.prefetchQuery({
-        queryKey: ["messages", threadId],
-        queryFn: () => api.getMessages(threadId),
+        queryKey: ["messages", accountId, threadId],
+        queryFn: () => api.getMessages(accountId, threadId),
         staleTime: 5 * 60_000,
       })));
     }
@@ -55,5 +55,5 @@ export function useUpcomingBodyPrefetch(email: string) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [email, selectedThreadId, threads, queryClient]);
+  }, [email, accountId, selectedThreadId, threads, queryClient]);
 }

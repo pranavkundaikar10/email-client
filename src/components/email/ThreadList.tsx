@@ -11,13 +11,14 @@ import BulkActionBar from "./BulkActionBar";
 const PAGE_SIZE = 50;
 
 interface Props {
+  accountId: string;
   activeView: string;
   effectiveSplitId?: string | null;
   searchResults?: Thread[];
   isSearching?: boolean;
 }
 
-export default function ThreadList({ activeView, effectiveSplitId, searchResults, isSearching }: Props) {
+export default function ThreadList({ accountId, activeView, effectiveSplitId, searchResults, isSearching }: Props) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const checkedThreadIds = useAppStore((s) => s.checkedThreadIds);
@@ -30,6 +31,7 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
   const { setStarred } = useMailFlags();
   const [syncingOlder, setSyncingOlder] = useState(false);
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const nextPageInFlight = useRef(false);
 
   const {
     data,
@@ -38,14 +40,14 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["threads", activeView, effectiveSplitId ?? null],
+    queryKey: ["threads", accountId, activeView, effectiveSplitId ?? null],
     queryFn: ({ pageParam = 0 }) =>
-      api.getThreads(PAGE_SIZE, pageParam as number, activeView, effectiveSplitId ?? undefined),
+      api.getThreads(accountId, PAGE_SIZE, pageParam as number, activeView, effectiveSplitId ?? undefined),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) =>
       lastPage.length < PAGE_SIZE ? undefined : allPages.flat().length,
     refetchInterval: 60_000,
-    enabled: !isSearching,
+    enabled: !isSearching && Boolean(accountId),
   });
 
   const inboxThreads = useMemo(() => data?.pages.flat() ?? [], [data]);
@@ -68,8 +70,15 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
     if (!nearBottom) return;
 
-    if (hasNextPage && !isFetchingNextPage) {
-      fetchNextPage();
+    if (hasNextPage && !isFetchingNextPage && !nextPageInFlight.current) {
+      // Scroll events can arrive several times before React Query has
+      // published isFetchingNextPage. Keep the cursor single-flight so every
+      // completed page advances from 50 to 100 to 150, rather than repeatedly
+      // requesting page 50.
+      nextPageInFlight.current = true;
+      void fetchNextPage().finally(() => {
+        nextPageInFlight.current = false;
+      });
       return;
     }
 
@@ -79,11 +88,14 @@ export default function ThreadList({ activeView, effectiveSplitId, searchResults
       )[0];
       if (!oldest) return;
       setSyncingOlder(true);
-      api.syncOlder(oldest.account_id, oldest.last_message_at)
+      api.syncOlder(accountId, oldest.last_message_at)
         .then((count) => {
           if (count > 0) {
-            queryClient.invalidateQueries({ queryKey: ["threads", activeView, effectiveSplitId ?? null] });
+            queryClient.invalidateQueries({ queryKey: ["threads", accountId, activeView, effectiveSplitId ?? null] });
           }
+        })
+        .catch((error) => {
+          addToast(`Could not load older emails: ${String(error)}`);
         })
         .finally(() => setSyncingOlder(false));
     }

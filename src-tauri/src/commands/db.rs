@@ -1,6 +1,7 @@
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
 use std::fs;
 use std::path::Path;
+use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -291,9 +292,40 @@ pub struct AttachmentRow {
     pub size_bytes: i64,
 }
 
+async fn enrich_correspondents(pool: &SqlitePool, rows: &mut [ThreadRow]) {
+    if rows.is_empty() { return; }
+    let placeholders = std::iter::repeat("?").take(rows.len()).collect::<Vec<_>>().join(",");
+    let sql = format!(r#"
+        SELECT m.thread_id, m.from_name, m.from_email
+        FROM messages m JOIN threads t ON t.id = m.thread_id
+        JOIN accounts a ON a.id = t.account_id
+        WHERE m.thread_id IN ({placeholders})
+          AND LOWER(m.from_email) != LOWER(a.email)
+          AND m.sent_at = (
+              SELECT MAX(m2.sent_at) FROM messages m2
+              WHERE m2.thread_id = m.thread_id
+                AND LOWER(m2.from_email) != LOWER(a.email)
+          )
+    "#);
+    let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
+    for row in rows.iter() { query = query.bind(&row.id); }
+    let matches = match query.fetch_all(pool).await {
+        Ok(matches) => matches,
+        Err(error) => { eprintln!("Could not enrich thread correspondents: {error}"); return; }
+    };
+    let correspondents: HashMap<_, _> = matches.into_iter().map(|(id, name, email)| (id, (name, email))).collect();
+    for row in rows {
+        if let Some((name, email)) = correspondents.get(&row.id) {
+            row.from_name = name.clone();
+            row.from_email = email.clone();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn get_threads(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
     view: Option<String>,
     category: Option<String>,
     limit: Option<i64>,
@@ -301,6 +333,9 @@ pub async fn get_threads(
 ) -> Result<Vec<ThreadRow>, String> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
+    if offset > 0 {
+        eprintln!("Thread list: loading local page at offset {offset} (limit {limit})");
+    }
 
     let where_clause = match view.as_deref() {
         Some("sent")    => "t.folder = 'sent'".to_string(),
@@ -339,7 +374,7 @@ pub async fn get_threads(
         "#,
     };
 
-    sqlx::query_as::<_, ThreadRow>(&format!(
+    let mut rows = sqlx::query_as::<_, ThreadRow>(&format!(
         r#"
         SELECT
             t.id, t.account_id, t.subject, t.snippet,
@@ -355,38 +390,47 @@ pub async fn get_threads(
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
-        WHERE {} {}
+        WHERE t.account_id = ? AND {} {}
         ORDER BY t.last_message_at DESC
         LIMIT ? OFFSET ?
         "#,
         where_clause,
         pending_operation_clause,
     ))
+    .bind(account_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool.inner())
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if offset > 0 {
+        eprintln!("Thread list: local page returned {} threads", rows.len());
+    }
+    enrich_correspondents(pool.inner(), &mut rows).await;
+    Ok(rows)
 }
 
 #[tauri::command]
 pub async fn get_messages(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
     thread_id: String,
 ) -> Result<Vec<MessageRow>, String> {
     sqlx::query_as::<_, MessageRow>(
         r#"
-        SELECT id, thread_id, from_email, from_name,
-               COALESCE(to_emails, '[]') AS to_emails,
-               COALESCE(cc_emails, '[]') AS cc_emails,
-               subject,
-               body_html, body_text, sent_at, unread, body_fetched, has_attachments
-        FROM messages
-        WHERE thread_id = ?
+        SELECT m.id, m.thread_id, m.from_email, m.from_name,
+               COALESCE(m.to_emails, '[]') AS to_emails,
+               COALESCE(m.cc_emails, '[]') AS cc_emails,
+               m.subject,
+               m.body_html, m.body_text, m.sent_at, m.unread, m.body_fetched, m.has_attachments
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        WHERE m.thread_id = ? AND t.account_id = ?
         ORDER BY sent_at ASC
         "#,
     )
     .bind(thread_id)
+    .bind(account_id)
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())
@@ -431,9 +475,10 @@ pub async fn get_unread_counts(
 #[tauri::command]
 pub async fn search_threads(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
     query: String,
 ) -> Result<Vec<ThreadRow>, String> {
-    sqlx::query_as::<_, ThreadRow>(
+    let mut rows = sqlx::query_as::<_, ThreadRow>(
         r#"
         SELECT
             t.id, t.account_id, t.subject, t.snippet,
@@ -450,7 +495,7 @@ pub async fn search_threads(
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
-        WHERE threads_fts MATCH ?
+        WHERE threads_fts MATCH ? AND t.account_id = ?
           AND NOT EXISTS (
               SELECT 1 FROM mail_operations o
               WHERE o.thread_id = t.id
@@ -461,7 +506,10 @@ pub async fn search_threads(
         "#,
     )
     .bind(query)
+    .bind(account_id)
     .fetch_all(pool.inner())
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    enrich_correspondents(pool.inner(), &mut rows).await;
+    Ok(rows)
 }

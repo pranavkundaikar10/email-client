@@ -142,10 +142,11 @@ function formatAttachmentSize(sizeBytes: number) {
 }
 
 function MessageCard({
-  message, email, isLast, replyOpen, onReplyOpen, onReplyClose, replyAnchorRef,
+  message, email, accountId, isLast, replyOpen, onReplyOpen, onReplyClose, replyAnchorRef,
 }: {
   message: Message;
   email: string;
+  accountId: string;
   isLast: boolean;
   replyOpen: boolean;
   onReplyOpen: () => void;
@@ -158,7 +159,7 @@ function MessageCard({
   const { mutate: fetchBody, isPending, error: fetchError } = useMutation<Message, Error, boolean>({
     mutationFn: (force) => api.fetchMessageBody(email, message.id, force),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["messages", message.thread_id] });
+      queryClient.invalidateQueries({ queryKey: ["messages", accountId, message.thread_id] });
       queryClient.invalidateQueries({ queryKey: ["message_attachments", message.id] });
     },
   });
@@ -177,7 +178,7 @@ function MessageCard({
     onSuccess: (path, attachmentId) => setDownloadedAttachments((current) => ({ ...current, [attachmentId]: path })),
   });
   useEffect(() => {
-    if (!isLast || isPending) return;
+    if (isPending) return;
     if (!message.body_fetched) {
       fetchBody(false);
     } else if (!refreshedEmptyHtml.current && !hasMeaningfulHtml(message.body_html)) {
@@ -192,7 +193,7 @@ function MessageCard({
       refreshedInlineImages.current = true;
       fetchBody(true);
     }
-  }, [isLast, isPending, message.body_fetched, message.body_html, message.body_text, fetchBody]);
+  }, [isPending, message.body_fetched, message.body_html, message.body_text, fetchBody]);
   useEffect(() => {
     if (!message.body_fetched || !message.has_attachments || loadingAttachments || attachments.length > 0 || refreshedAttachmentMetadata.current) return;
     // Older cached bodies predate attachment metadata. Refresh only this one
@@ -600,7 +601,7 @@ function FollowUpPicker({ onSchedule, onClose, scheduling }: {
   </div>;
 }
 
-export default function EmailPreview({ email, reviewMode = false, followUpMode = false }: { email: string; reviewMode?: boolean; followUpMode?: boolean }) {
+export default function EmailPreview({ email, accountId, reviewMode = false, followUpMode = false }: { email: string; accountId: string; reviewMode?: boolean; followUpMode?: boolean }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const selectNextThread = useAppStore((s) => s.selectNextThread);
   const selectPrevThread = useAppStore((s) => s.selectPrevThread);
@@ -615,15 +616,15 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   const replyAnchorRef = useRef<HTMLDivElement>(null);
 
   const { data: messages = [], isLoading } = useQuery({
-    queryKey: ["messages", selectedThreadId],
-    queryFn: () => api.getMessages(selectedThreadId!),
-    enabled: !!selectedThreadId,
+    queryKey: ["messages", accountId, selectedThreadId],
+    queryFn: () => api.getMessages(accountId, selectedThreadId!),
+    enabled: !!selectedThreadId && Boolean(accountId),
   });
   const { data: aiAssistanceSettings = { enabled: true } } = useQuery({
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
   });
-  useUpcomingBodyPrefetch(email);
+  useUpcomingBodyPrefetch(email, accountId);
 
   const { data: reviewQueue = [] } = useQuery({
     queryKey: ["review_queue", "priority"],
@@ -720,9 +721,19 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
   });
 
   const { mutate: completeFollowUp, isPending: completingFollowUp } = useMutation({
-    mutationFn: (threadId: string) => api.completeFollowUp(threadId),
+    mutationFn: async (threadId: string) => {
+      // Completing a follow-up means the email was deliberately handled but
+      // remains in the inbox, which is the same review outcome as Keep.
+      await api.completeFollowUp(threadId);
+      await api.recordReviewDecision(threadId, "keep");
+    },
     onSuccess: () => {
+      // Select an adjacent visible item before the completed follow-up drops
+      // out of both Review and Follow-ups.
+      useAppStore.getState().selectNextOrPrev();
       void queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
+      void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
       addToast("Follow-up completed");
     },
     onError: (err) => addToast(`Could not complete follow-up: ${String(err)}`),
@@ -765,6 +776,11 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         setFollowUpPickerOpen(true);
         return;
       }
+      if (key === "i" && followUpItem && !completingFollowUp) {
+        e.preventDefault();
+        completeFollowUp(followUpItem.thread_id);
+        return;
+      }
       if (key === "i" && reviewMode && reviewItem && !savingReview) {
         e.preventDefault();
         recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
@@ -778,7 +794,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteThread, followUpItem, followUpMode, openReply, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
+  }, [completeFollowUp, completingFollowUp, deleteThread, followUpItem, followUpMode, openReply, recordReview, reviewItem, reviewMode, savingReview, selectedThreadId]);
 
   // Handle keyboard shortcuts forwarded from the email iframe via postMessage.
   // useHotkeys is bypassed because hotkeys-js checks keyCode which synthetic events lack.
@@ -811,6 +827,10 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
         setFollowUpPickerOpen(true);
         return;
       }
+      if (key === "i" && followUpItem && !completingFollowUp) {
+        completeFollowUp(followUpItem.thread_id);
+        return;
+      }
       if (key === "i" && reviewMode && reviewItem && !savingReview) {
         recordReview({ threadId: reviewItem.thread_id, decision: "keep" });
         return;
@@ -832,7 +852,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, deleteThread, followUpItem, followUpMode, markRead, openReply, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
+  }, [selectNextThread, selectPrevThread, setSelectedThread, archive, completeFollowUp, completingFollowUp, deleteThread, followUpItem, followUpMode, markRead, openReply, recordReview, reviewItem, reviewMode, savingReview, setStarred]);
 
   useEffect(() => {
     if (!selectedThreadId) return;
@@ -994,6 +1014,7 @@ export default function EmailPreview({ email, reviewMode = false, followUpMode =
             key={msg.id}
             message={msg}
             email={email}
+            accountId={accountId}
             isLast={i === messages.length - 1}
             replyOpen={i === messages.length - 1 && replyOpen}
             onReplyOpen={openReply}

@@ -25,7 +25,7 @@ const sections = [
       ["S", "Star or unstar"],
       ["X", "Select email for bulk actions"],
       ["Z", "Undo archive or delete"],
-      ["I", "Keep in inbox (Review)"],
+      ["I", "Keep in inbox / complete follow-up"],
       ["F", "Schedule follow-up (Review / Follow-ups)"],
     ],
   },

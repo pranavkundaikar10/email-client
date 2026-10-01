@@ -147,3 +147,19 @@ or changes to the shared account-scoped data model.
 A unified multi-account inbox is intentionally out of scope for this
 foundation. It should be designed separately, including cross-account search,
 sorting, badges, action confirmation, and the visual source of each message.
+
+## Thread correspondent display
+
+Thread-list identity is presentation data, not a reason to complicate the
+primary mailbox query. For inbox-style views, show the newest inbound
+correspondent rather than the user's own address after an outgoing reply.
+
+Implementation rule: load the reliable thread list first, then use one bounded
+batch query to enrich its rows with the newest message whose sender is not the
+owning account. If that optional enrichment fails, retain the primary row's
+existing sender fields. Never use a complex correlated sender join in the core
+thread-list query and never issue one query per row.
+
+A future `thread_participants`/`display_correspondent` projection may support
+group threads and explicit `To: recipient` labels for Sent, but is deferred
+until sync-maintained derived data is justified.

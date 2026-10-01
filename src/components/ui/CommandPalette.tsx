@@ -17,6 +17,7 @@ interface Action {
 }
 
 interface Props {
+  accountId: string;
   onViewChange: (view: View) => void;
   onClose: () => void;
   splits?: { id: string; label: string }[];
@@ -26,7 +27,7 @@ interface Props {
   isSimpleFullscreen: boolean;
 }
 
-export default function CommandPalette({ onViewChange, onClose, splits, onSplitChange, onSplitsSettings, onToggleFullscreen, isSimpleFullscreen }: Props) {
+export default function CommandPalette({ accountId, onViewChange, onClose, splits, onSplitChange, onSplitsSettings, onToggleFullscreen, isSimpleFullscreen }: Props) {
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const { setSelectedThread } = useAppStore();
@@ -34,9 +35,9 @@ export default function CommandPalette({ onViewChange, onClose, splits, onSplitC
   const listRef = useRef<HTMLDivElement>(null);
 
   const { data: searchResults = [] } = useQuery({
-    queryKey: ["search", query],
-    queryFn: () => api.searchThreads(query),
-    enabled: query.length > 1,
+    queryKey: ["search", accountId, query],
+    queryFn: () => api.searchThreads(accountId, query),
+    enabled: query.length > 1 && Boolean(accountId),
     staleTime: 5_000,
   });
 

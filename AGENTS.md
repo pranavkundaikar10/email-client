@@ -14,6 +14,12 @@ In particular:
   optimistic updates, durable delivery, and the standard 8-second Undo window.
 - Gmail read/star changes must use the durable, coalescing flag-operation
   queue; never start an unmanaged IMAP request directly from their command.
+- Treat `docs/mail-action-contract.md` as the source of truth for action
+  semantics. Archive/delete may create `mail_operations`; read/unread/star may
+  create `mail_flag_operations`; Keep, Complete, schedule/reschedule
+  follow-up, review decisions, and AI analysis are local-only and must never
+  enqueue Gmail work. Add or update the contract's regression coverage when
+  changing an action.
 - When a behavior is shared by more than one view, extract it into a focused
   reusable component or hook before adding another view-specific version.
 - Keep cache updates, optimistic UI behavior, failure recovery, and keyboard
@@ -32,6 +38,17 @@ In particular:
   can choose a deeper review when needed.
 - User triage preferences are local-only context appended to the locked AI
   contract; they must never replace its JSON schema or safety safeguards.
+
+## Test coverage for behavior changes
+
+Add or update automated coverage whenever a new feature or bug fix changes
+state, persistence, keyboard behavior, routing, sync, account isolation, or a
+local/remote mail action boundary. Pure visual styling and layout-only changes
+may use proportionate manual verification instead.
+
+Gmail actions, outbox delivery and failure recovery, follow-up/review state,
+and account scoping are safety-critical: changes to them require regression
+coverage. Follow `docs/mail-action-contract.md` for the required action tests.
 
 ## Before handoff
 

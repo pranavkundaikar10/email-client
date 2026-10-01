@@ -90,6 +90,16 @@ pub struct AccountProfile {
     profile_picture: Option<String>,
 }
 
+/// The explicit account identity consumed by the new account-aware data
+/// layer. Existing email-based commands remain untouched until each feature
+/// is ported vertically to this context.
+#[derive(Serialize)]
+pub struct AccountContext {
+    id: String,
+    email: String,
+    provider: String,
+}
+
 struct GoogleOAuthClient {
     id: String,
     secret: String,
@@ -501,6 +511,20 @@ pub fn get_account_profile(app: tauri::AppHandle, email: String) -> Result<Accou
     Ok(AccountProfile {
         email: account.email,
         profile_picture: account.profile_picture,
+    })
+}
+
+#[tauri::command]
+pub fn get_account_context(app: tauri::AppHandle, email: String) -> Result<AccountContext, String> {
+    let account = load_store(&app)?
+        .accounts
+        .into_iter()
+        .find(|account| account.email == email)
+        .ok_or_else(|| format!("No account found for {email}"))?;
+    Ok(AccountContext {
+        id: account.id,
+        email: account.email,
+        provider: "gmail".to_string(),
     })
 }
 

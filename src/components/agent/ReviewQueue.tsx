@@ -93,7 +93,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div className="mt-5 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
-                  <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-500">AI analysis</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">AI analysis</p>
                   <p className="mt-1 text-sm leading-relaxed text-gray-800">{item.summary || "No summary available."}</p>
                   {item.deadline && <p className="mt-2 text-xs font-medium text-red-600">Due {item.deadline}</p>}
                   {items.length > 0 && (

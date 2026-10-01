@@ -333,12 +333,12 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
         : "text-gray-500 bg-gray-100 ring-gray-200";
 
   return (
-    <div className="mx-6 mt-4 mb-1 rounded-lg border border-gray-200 border-l-2 border-l-indigo-500 bg-white px-4 py-3">
+    <div className="mx-6 mt-4 mb-1 rounded-lg border border-indigo-100 border-l-2 border-l-indigo-500 bg-indigo-50/50 px-4 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-indigo-500">
-            <Sparkles size={12} />
-            AI analysis
+          <div className="flex items-center gap-1.5">
+            <Sparkles size={14} />
+            <p className="text-[13px] font-semibold uppercase tracking-wide text-indigo-600">AI analysis</p>
             <JobCategoryBadge
               isJobRelated={analysis.is_job_related}
               category={analysis.job_category}
@@ -938,7 +938,7 @@ export default function EmailPreview({ email, accountId, reviewMode = false, fol
           <div className="flex items-center justify-between gap-4">
             <div>
               {reviewItem.analysis_available ? <>
-                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-500">AI recommendation</p>
+                <p className="text-[13px] font-semibold uppercase tracking-wide text-indigo-600">AI recommendation</p>
                 <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
                   {recommendationLabel(reviewItem.recommended_action)}
                 </p>

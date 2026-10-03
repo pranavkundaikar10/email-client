@@ -1,6 +1,6 @@
 mod commands;
 
-use commands::{agent, auth, compose, db, splits, sync};
+use commands::{agent, auth, compose, db, splits, sync, triage_worker};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,6 +11,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let operation_worker = sync::MailOperationWorker::default();
             let inbox_idle_worker = sync::InboxIdleWorker::default();
+            let triage_worker = triage_worker::BackgroundTriageWorker::default();
             let worker_for_startup = operation_worker.clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = db::migrate_legacy_app_data(&app_handle) {
@@ -43,6 +44,7 @@ pub fn run() {
             });
             app.manage(operation_worker);
             app.manage(inbox_idle_worker);
+            app.manage(triage_worker);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -93,6 +95,7 @@ pub fn run() {
             agent::set_thinking_settings,
             agent::get_auto_analysis_candidates,
             agent::get_auto_analysis_pending_count,
+            triage_worker::process_background_triage,
             agent::get_review_queue,
             agent::record_review_decision,
             agent::schedule_follow_up,

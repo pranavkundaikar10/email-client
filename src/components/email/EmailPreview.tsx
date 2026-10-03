@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Message } from "../../lib/api";
 import { useAppStore } from "../../store";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, CalendarClock, Download, ExternalLink, MailOpen, Paperclip, Reply, Trash2, Sparkles, X } from "lucide-react";
+import { Archive, CalendarClock, CalendarPlus, Download, ExternalLink, MailOpen, Paperclip, Reply, Trash2, Sparkles, X } from "lucide-react";
 import ReplyComposer from "./ReplyComposer";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { useMailActions } from "../../hooks/useMailActions";
@@ -10,6 +10,7 @@ import { useMailFlags } from "../../hooks/useMailFlags";
 import { useUpcomingBodyPrefetch } from "../../hooks/useUpcomingBodyPrefetch";
 import JobCategoryBadge from "../ui/JobCategoryBadge";
 import { recommendationLabel, recommendationTone } from "../../lib/recommendations";
+import { calendarIcs, googleCalendarUrl, type CalendarEventDraft } from "../../lib/calendar";
 
 // Renders HTML email in an isolated iframe so its <style> tags cannot
 // leak out and shift the host page layout.
@@ -321,9 +322,24 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
     queryFn: () => api.getThreadAnalysis(threadId),
   });
 
+  const calendarEvent = useMemo(() => {
+    try {
+      const event = analysis?.calendar_event ? JSON.parse(analysis.calendar_event) as CalendarEventDraft : null;
+      return event?.title && event.start_at && event.end_at ? event : null;
+    } catch { return null; }
+  }, [analysis?.calendar_event]);
   if (!analysis) return null;
   const items = parseActionItems(analysis.action_items);
   const severity = severityForImportance(analysis.importance);
+  const downloadCalendarFile = () => {
+    if (!calendarEvent) return;
+    const href = URL.createObjectURL(new Blob([calendarIcs(calendarEvent)], { type: "text/calendar" }));
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = `${calendarEvent.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "event"}.ics`;
+    link.click();
+    URL.revokeObjectURL(href);
+  };
   const severityStyle = analysis.importance >= 5
     ? "text-red-600 bg-red-50 ring-red-100"
     : analysis.importance >= 4
@@ -359,6 +375,18 @@ function AnalysisBanner({ threadId }: { threadId: string }) {
       </div>
       {analysis.deadline && (
         <p className="mt-2 text-xs font-medium text-red-600">Due {analysis.deadline}</p>
+      )}
+      {calendarEvent && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-indigo-100 bg-white/70 px-3 py-2.5">
+          <div className="min-w-0">
+            <p className="flex items-center gap-1.5 text-xs font-semibold text-indigo-800"><CalendarPlus size={14} /> Calendar event detected</p>
+            <p className="mt-1 truncate text-xs text-gray-600">{new Date(calendarEvent.start_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · {calendarEvent.title}</p>
+          </div>
+          <div className="flex items-center gap-1">
+            <button type="button" onClick={() => void openUrl(googleCalendarUrl(calendarEvent))} className="rounded-md px-2 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100">Google Calendar</button>
+            <button type="button" onClick={downloadCalendarFile} className="rounded-md px-2 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100">.ics</button>
+          </div>
+        </div>
       )}
       {items.length > 0 && (
         <ul className="mt-1.5 space-y-0.5">

@@ -62,7 +62,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   const startupViewResolved = useRef(false);
   const [, setSyncing] = useState(false);
   const syncedFolders = useRef(new Set<string>());
-  const backgroundAnalysisRunning = useRef(false);
   const inboxSyncInProgress = useRef(false);
   const addToast = useAppStore((s) => s.addToast);
   const [composeOpen, setComposeOpen] = useState(false);
@@ -124,14 +123,6 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
   });
-  const { data: ollamaModels = [], isSuccess: ollamaAvailable } = useQuery({
-    queryKey: ["ollama_models"],
-    queryFn: api.getOllamaModels,
-    enabled: aiAssistanceSettings.enabled,
-    retry: false,
-    refetchInterval: 60_000,
-  });
-
   const { data: unreadCounts = {} } = useQuery({
     queryKey: ["unread_counts"],
     queryFn: api.getUnreadCounts,
@@ -268,30 +259,16 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     setComposeOpen(true);
   }, { enableOnFormTags: false });
 
-  const processOneRecentEmail = useCallback(async () => {
-    // Keep local inference deliberately low-impact: one email at a time,
-    // never in parallel, and only for mail received today.
-    if (!aiAssistanceSettings.enabled || !ollamaAvailable || ollamaModels.length === 0 || backgroundAnalysisRunning.current) return;
-    backgroundAnalysisRunning.current = true;
+  const startBackgroundTriage = useCallback(async () => {
+    if (!aiAssistanceSettings.enabled) return;
     try {
-      const [candidate] = await api.getAutoAnalysisCandidates(1);
-      if (!candidate) return;
-
-      // BODY.PEEK fetches the content without changing Gmail's read state.
-      await api.fetchMessageBody(email, candidate.message_id);
-      await api.analyzeThread(candidate.thread_id, undefined, undefined, "background");
-      queryClient.invalidateQueries({ queryKey: ["thread_analysis", candidate.thread_id] });
-      queryClient.invalidateQueries({ queryKey: ["digest"] });
-      queryClient.invalidateQueries({ queryKey: ["review_queue"] });
-      queryClient.invalidateQueries({ queryKey: ["threads"] });
-      queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
-      queryClient.invalidateQueries({ queryKey: ["search"] });
+      // Rust owns job discovery, durable leasing, body loading, and inference.
+      // This call returns immediately; the desktop UI never waits on Ollama.
+      await api.processBackgroundTriage();
     } catch (err) {
-      console.warn("Background email analysis skipped:", err);
-    } finally {
-      backgroundAnalysisRunning.current = false;
+      console.warn("Could not start background email triage:", err);
     }
-  }, [aiAssistanceSettings.enabled, email, ollamaAvailable, ollamaModels.length, queryClient]);
+  }, [aiAssistanceSettings.enabled]);
 
   // Both the periodic fallback and IMAP IDLE events use this single sync path.
   // It owns cache invalidation and keeps local LLM work serialized.
@@ -306,7 +283,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
       queryClient.invalidateQueries({ queryKey: ["review_queue"] });
       queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
-      await processOneRecentEmail();
+      await startBackgroundTriage();
       queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
     } catch (err) {
       addToast(`Sync failed: ${String(err)}`);
@@ -315,7 +292,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       setSyncing(false);
       setInitialSyncComplete(true);
     }
-  }, [addToast, email, processOneRecentEmail, queryClient]);
+  }, [addToast, email, queryClient, startBackgroundTriage]);
 
   useEffect(() => {
     void syncInbox();
@@ -340,6 +317,21 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
       void unlisten.then((dispose) => dispose());
     };
   }, [email, syncInbox]);
+
+  useEffect(() => {
+    const unlisten = listen("background-triage-updated", () => {
+      // The worker has persisted an analysis or retry state. Refresh only
+      // read models; React owns presentation, not the AI job lifecycle.
+      void queryClient.invalidateQueries({ queryKey: ["review_queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] });
+      void queryClient.invalidateQueries({ queryKey: ["thread_analysis"] });
+      void queryClient.invalidateQueries({ queryKey: ["digest"] });
+      void queryClient.invalidateQueries({ queryKey: ["threads"] });
+      void queryClient.invalidateQueries({ queryKey: ["follow_ups"] });
+      void queryClient.invalidateQueries({ queryKey: ["search"] });
+    });
+    return () => { void unlisten.then((dispose) => dispose()); };
+  }, [queryClient]);
 
   // Lazy sync for sent/drafts — fire once per session when the view is first visited
   useEffect(() => {

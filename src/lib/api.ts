@@ -80,6 +80,7 @@ export interface ThreadAnalysis {
   action_items: string; // JSON-encoded string[]
   deadline: string | null;
   recommended_action: RecommendedAction;
+  calendar_event: string | null;
   model: string;
   analyzed_at: string;
 }
@@ -284,6 +285,9 @@ export const api = {
 
   getAutoAnalysisPendingCount: () =>
     invoke<number>("get_auto_analysis_pending_count"),
+
+  processBackgroundTriage: () =>
+    invoke<void>("process_background_triage"),
 
   getReviewQueue: (limit = 50, sort: "priority" | "newest" | "oldest" = "priority") =>
     invoke<ReviewItem[]>("get_review_queue", { limit, sort }),

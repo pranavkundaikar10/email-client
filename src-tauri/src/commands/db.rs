@@ -331,13 +331,34 @@ pub async fn get_threads(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<ThreadRow>, String> {
+    list_threads_for_account(
+        pool.inner(),
+        &account_id,
+        view.as_deref(),
+        category.as_deref(),
+        limit,
+        offset,
+    ).await
+}
+
+/// The account-scoped thread-list query shared by the Tauri command and
+/// isolated tests. Review and follow-up queues are intentionally unified;
+/// ordinary list views must never cross this account boundary.
+async fn list_threads_for_account(
+    pool: &SqlitePool,
+    account_id: &str,
+    view: Option<&str>,
+    category: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<ThreadRow>, String> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
     if offset > 0 {
         eprintln!("Thread list: loading local page at offset {offset} (limit {limit})");
     }
 
-    let where_clause = match view.as_deref() {
+    let where_clause = match view {
         Some("sent")    => "t.folder = 'sent'".to_string(),
         Some("drafts")  => "t.folder = 'drafts'".to_string(),
         // Gmail's Starred label is independent of Inbox: archived (and sent)
@@ -345,7 +366,7 @@ pub async fn get_threads(
         Some("starred") => "t.starred = 1".to_string(),
         Some("archive") => "t.folder = 'inbox' AND t.archived = 1".to_string(),
         _               => {
-            let cat = match &category {
+            let cat = match category {
                 Some(c) if !c.is_empty() => format!(" AND t.category = '{}'", c.replace('\'', "''")),
                 _ => String::new(),
             };
@@ -356,7 +377,7 @@ pub async fn get_threads(
     // independent Starred label during the Undo/delivery window. A pending
     // trash operation, however, is hidden everywhere just like a deleted
     // message in Gmail.
-    let pending_operation_clause = match view.as_deref() {
+    let pending_operation_clause = match view {
         Some("starred") => r#"
           AND NOT EXISTS (
               SELECT 1 FROM mail_operations o
@@ -400,13 +421,13 @@ pub async fn get_threads(
     .bind(account_id)
     .bind(limit)
     .bind(offset)
-    .fetch_all(pool.inner())
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
     if offset > 0 {
         eprintln!("Thread list: local page returned {} threads", rows.len());
     }
-    enrich_correspondents(pool.inner(), &mut rows).await;
+    enrich_correspondents(pool, &mut rows).await;
     Ok(rows)
 }
 
@@ -415,6 +436,14 @@ pub async fn get_messages(
     pool: tauri::State<'_, SqlitePool>,
     account_id: String,
     thread_id: String,
+) -> Result<Vec<MessageRow>, String> {
+    get_messages_for_account(pool.inner(), &account_id, &thread_id).await
+}
+
+pub(crate) async fn get_messages_for_account(
+    pool: &SqlitePool,
+    account_id: &str,
+    thread_id: &str,
 ) -> Result<Vec<MessageRow>, String> {
     sqlx::query_as::<_, MessageRow>(
         r#"
@@ -431,7 +460,7 @@ pub async fn get_messages(
     )
     .bind(thread_id)
     .bind(account_id)
-    .fetch_all(pool.inner())
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
 }
@@ -512,4 +541,40 @@ pub async fn search_threads(
     .map_err(|e| e.to_string())?;
     enrich_correspondents(pool.inner(), &mut rows).await;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_threads_for_account;
+    use crate::commands::test_support::TestDatabase;
+
+    #[tokio::test]
+    async fn account_thread_lists_never_include_another_accounts_threads() {
+        let database = TestDatabase::new().await;
+        database.seed_account("account-a", "a@example.com").await;
+        database.seed_account("account-b", "b@example.com").await;
+        database.seed_thread_for_account("thread-a", "account-a").await;
+        database.seed_thread_for_account("thread-b", "account-b").await;
+
+        let account_a_threads = list_threads_for_account(
+            &database.pool,
+            "account-a",
+            None,
+            None,
+            Some(50),
+            Some(0),
+        ).await.expect("list account A threads");
+        let account_b_threads = list_threads_for_account(
+            &database.pool,
+            "account-b",
+            None,
+            None,
+            Some(50),
+            Some(0),
+        ).await.expect("list account B threads");
+
+        assert_eq!(account_a_threads.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(), ["thread-a"]);
+        assert_eq!(account_b_threads.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(), ["thread-b"]);
+        database.close().await;
+    }
 }

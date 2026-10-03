@@ -1,4 +1,4 @@
-use chrono::TimeZone;
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
@@ -19,6 +19,7 @@ pub struct AnalysisRow {
     pub action_items: String, // JSON array, kept as string like `rules`/`label_ids` elsewhere in this codebase
     pub deadline: Option<String>,
     pub recommended_action: String,
+    pub calendar_event: Option<String>,
     pub model: String,
     pub analyzed_at: String,
 }
@@ -45,6 +46,7 @@ pub struct DigestItem {
 pub struct AutoAnalysisCandidate {
     pub thread_id: String,
     pub message_id: String,
+    pub message_received_at: String,
 }
 
 /// User-controlled thinking behavior for the two analysis workloads. Manual
@@ -149,6 +151,21 @@ struct ModelPayload {
     deadline: Option<String>,
     #[serde(default = "default_recommended_action")]
     recommended_action: String,
+    #[serde(default)]
+    calendar_event: Option<CalendarEventDraft>,
+}
+
+/// A provider-neutral, user-reviewable event candidate. It is deliberately
+/// data only: Google, Outlook, Apple Calendar, and ICS export are adapters.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CalendarEventDraft {
+    title: String,
+    start_at: String,
+    end_at: String,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    description: String,
 }
 
 fn default_importance() -> i64 { 3 }
@@ -243,7 +260,12 @@ async fn configured_ai_assistance(pool: &SqlitePool) -> Result<AiAssistanceSetti
         .unwrap_or_default())
 }
 
-fn system_prompt(triage_preferences: &str) -> String {
+fn system_prompt(triage_preferences: &str, include_calendar_event: bool) -> String {
+    let calendar_schema = if include_calendar_event {
+        ",\n  \"calendar_event\": {\"title\":\"...\",\"start_at\":\"RFC3339 with timezone\",\"end_at\":\"RFC3339 with timezone\",\"location\":\"...\"} or null"
+    } else {
+        ""
+    };
     let mut prompt = r#"You are an assistant that triages a job-seeker's email inbox. For the
 single email given, decide whether it needs action and extract concrete next
 steps. General triage categories: interview, assessment, offer, rejection,
@@ -268,13 +290,18 @@ Respond with ONLY a JSON object, no other text, matching exactly:
   "summary": "one sentence, under 25 words",
   "action_items": ["short imperative next step", "..."],
   "deadline": "YYYY-MM-DD" or null if none stated,
-  "recommended_action": "keep|follow_up|archive|delete|review"
+  "recommended_action": "keep|follow_up|archive|delete|review"{calendar_schema}
 }
 If the email is a newsletter, marketing, or has nothing to act on, set
 is_actionable to false, importance to 1 or 2, and action_items to []. Choose
 delete only for an unmistakably promotional or marketing email when the user's
 preferences support it; otherwise prefer archive for low-value email. Never
-recommend delete for an email with an attachment. Use review when uncertain."#.to_string();
+recommend delete for an email with an attachment. Use review when uncertain.
+Only provide calendar_event when the email explicitly states both a date and a
+time for an event, including its timezone or offset. A confirmed registration,
+personal attendance instruction, or personal join link qualifies; a generic
+advertisement alone does not. Never invent a time, duration, attendees, or
+meeting link; use null when any required detail is uncertain."#.replace("{calendar_schema}", calendar_schema);
 
     if !triage_preferences.trim().is_empty() {
         prompt.push_str(
@@ -301,6 +328,20 @@ fn normalized_recommended_action(action: &str) -> String {
         "keep" | "follow_up" | "archive" | "delete" | "review" => action.trim().to_ascii_lowercase(),
         _ => "review".to_string(),
     }
+}
+
+fn normalized_calendar_event(event: Option<CalendarEventDraft>) -> Option<CalendarEventDraft> {
+    let event = event?;
+    if event.title.trim().is_empty() { return None; }
+    let start = chrono::DateTime::parse_from_rfc3339(&event.start_at).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(&event.end_at).ok()?;
+    if end <= start { return None; }
+    Some(CalendarEventDraft {
+        title: truncate(event.title.trim(), 160),
+        start_at: start.to_rfc3339(), end_at: end.to_rfc3339(),
+        location: truncate(event.location.trim(), 500),
+        description: truncate(event.description.trim(), 2_000),
+    })
 }
 
 fn strip_html(html: &str) -> String {
@@ -352,7 +393,7 @@ async fn call_model(
         // preventing a malformed or overly verbose reply from monopolizing
         // the local model.
         options: think.map(|thinking_enabled| (!thinking_enabled).then_some(OllamaOptions {
-            num_predict: 160,
+            num_predict: 320,
             temperature: 0.0,
         })).flatten(),
     };
@@ -377,6 +418,10 @@ async fn call_model(
 
     serde_json::from_str::<ModelPayload>(&parsed.message.content)
         .map_err(|e| format!("model did not return valid JSON ({}): {}", e, parsed.message.content))
+}
+
+fn should_retry_without_calendar(error: &str) -> bool {
+    error.starts_with("model did not return valid JSON")
 }
 
 /// Fetch the most recent message in a thread and reduce it to plain text
@@ -431,34 +476,66 @@ pub async fn analyze_thread(
     base_url: Option<String>,
     analysis_mode: Option<String>,
 ) -> Result<AnalysisRow, String> {
-    if !configured_ai_assistance(pool.inner()).await?.enabled {
+    analyze_thread_with_pool(
+        pool.inner(),
+        &thread_id,
+        model,
+        base_url,
+        analysis_mode.as_deref(),
+    ).await
+}
+
+/// Shared manual/background analysis implementation. Callers only choose the
+/// mode; policy, attachment protection, model settings, and persistence stay
+/// identical across both entry points.
+pub(crate) async fn analyze_thread_with_pool(
+    pool: &SqlitePool,
+    thread_id: &str,
+    model: Option<String>,
+    base_url: Option<String>,
+    analysis_mode: Option<&str>,
+) -> Result<AnalysisRow, String> {
+    if !configured_ai_assistance(pool).await?.enabled {
         return Err("AI assistance is turned off in Settings".to_string());
     }
     let model = match model {
         Some(model) => model,
-        None => configured_model(pool.inner()).await?,
+        None => configured_model(pool).await?,
     };
     let base_url = base_url.unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
-    let triage_preferences = configured_triage_preferences(pool.inner()).await?;
-    let thinking_settings = configured_thinking_settings(pool.inner()).await?;
-    let think = match analysis_mode.as_deref() {
+    let triage_preferences = configured_triage_preferences(pool).await?;
+    let thinking_settings = configured_thinking_settings(pool).await?;
+    let think = match analysis_mode {
         Some("background") => thinking_settings.background,
         Some("manual") | None => thinking_settings.manual,
         Some(_) => return Err("invalid analysis mode".to_string()),
     };
 
     let (from_name, from_email, subject, body, has_attachments) =
-        latest_message_text(pool.inner(), &thread_id).await?;
+        latest_message_text(pool, thread_id).await?;
 
     let prompt = build_user_prompt(&from_name, &from_email, &subject, &body, has_attachments);
-    let mut payload = call_model(
+    let mut payload = match call_model(
         &base_url,
         &model,
-        system_prompt(&triage_preferences),
-        prompt,
+        system_prompt(&triage_preferences, true),
+        prompt.clone(),
         Some(think),
     )
-    .await?;
+    .await {
+        Ok(payload) => payload,
+        // A calendar candidate must never make ordinary triage unusable. One
+        // compact retry removes only that optional field when output was cut
+        // off before valid JSON could be returned.
+        Err(error) if should_retry_without_calendar(&error) => call_model(
+            &base_url,
+            &model,
+            system_prompt(&triage_preferences, false),
+            prompt,
+            Some(think),
+        ).await?,
+        Err(error) => return Err(error),
+    };
 
     // An attached document may contain the actual assessment, contract, or
     // request. Until attachment extraction exists, never let the model label
@@ -485,13 +562,15 @@ pub async fn analyze_thread(
     } else {
         normalized_recommended_action(&payload.recommended_action)
     };
+    let calendar_event = normalized_calendar_event(payload.calendar_event);
+    let calendar_event_json = calendar_event.as_ref().and_then(|event| serde_json::to_string(event).ok());
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
         r#"
         INSERT INTO email_analysis
-            (thread_id, is_actionable, importance, category, is_job_related, job_category, summary, action_items, deadline, recommended_action, model, analyzed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, is_actionable, importance, category, is_job_related, job_category, summary, action_items, deadline, recommended_action, calendar_event, model, analyzed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             is_actionable = excluded.is_actionable,
             importance    = excluded.importance,
@@ -502,11 +581,12 @@ pub async fn analyze_thread(
             action_items  = excluded.action_items,
             deadline      = excluded.deadline,
             recommended_action = excluded.recommended_action,
+            calendar_event = excluded.calendar_event,
             model         = excluded.model,
             analyzed_at   = excluded.analyzed_at
         "#,
     )
-    .bind(&thread_id)
+    .bind(thread_id)
     .bind(payload.is_actionable)
     .bind(importance)
     .bind(&payload.category)
@@ -516,14 +596,15 @@ pub async fn analyze_thread(
     .bind(&action_items_json)
     .bind(&payload.deadline)
     .bind(&recommended_action)
+    .bind(&calendar_event_json)
     .bind(&model)
     .bind(&now)
-    .execute(pool.inner())
+    .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
     Ok(AnalysisRow {
-        thread_id,
+        thread_id: thread_id.to_string(),
         is_actionable: payload.is_actionable,
         importance,
         category: payload.category,
@@ -533,6 +614,7 @@ pub async fn analyze_thread(
         action_items: action_items_json,
         deadline: payload.deadline,
         recommended_action,
+        calendar_event: calendar_event_json,
         model,
         analyzed_at: now,
     })
@@ -709,19 +791,30 @@ pub async fn analyze_inbox(
     Ok(results)
 }
 
-/// Return recent inbox messages that have not yet been analyzed. The client
-/// deliberately takes only one at a time so local inference never competes
-/// with the UI or starts multiple Ollama requests concurrently.
+/// Return recent inbox messages that have not yet been analyzed. The worker
+/// takes one at a time so local inference never competes with the UI or starts
+/// multiple Ollama requests concurrently.
 #[tauri::command]
 pub async fn get_auto_analysis_candidates(
     pool: tauri::State<'_, SqlitePool>,
     limit: Option<i64>,
 ) -> Result<Vec<AutoAnalysisCandidate>, String> {
-    if !configured_ai_assistance(pool.inner()).await?.enabled {
+    background_analysis_candidates(pool.inner(), limit.unwrap_or(1), Utc::now()).await
+}
+
+/// Candidate selection for the low-impact background worker. This is kept
+/// separate from the Tauri command so the eventual worker and its tests use
+/// the exact same account-independent eligibility rules.
+pub(crate) async fn background_analysis_candidates(
+    pool: &SqlitePool,
+    limit: i64,
+    now: DateTime<Utc>,
+) -> Result<Vec<AutoAnalysisCandidate>, String> {
+    if !configured_ai_assistance(pool).await?.enabled {
         return Ok(Vec::new());
     }
-    let limit = limit.unwrap_or(1).clamp(1, 5);
-    let today_start = chrono::Local::now()
+    let limit = limit.clamp(1, 5);
+    let today_start = now.with_timezone(&chrono::Local)
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
@@ -730,24 +823,30 @@ pub async fn get_auto_analysis_candidates(
 
     sqlx::query_as::<_, AutoAnalysisCandidate>(
         r#"
-        SELECT t.id AS thread_id, m.id AS message_id
+        SELECT t.id AS thread_id, m.id AS message_id, t.last_message_at AS message_received_at
         FROM threads t
         JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ?
           AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+          AND (j.thread_id IS NULL OR j.status != 'failed' OR j.message_id != m.id)
         ORDER BY t.last_message_at DESC
         LIMIT ?
         "#,
     )
     .bind(today_start)
     .bind(limit)
-    .fetch_all(pool.inner())
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn background_triage_enabled(pool: &SqlitePool) -> Result<bool, String> {
+    Ok(configured_ai_assistance(pool).await?.enabled)
 }
 
 /// Count the same received-today inbox threads eligible for background
@@ -757,10 +856,14 @@ pub async fn get_auto_analysis_candidates(
 pub async fn get_auto_analysis_pending_count(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<i64, String> {
-    if !configured_ai_assistance(pool.inner()).await?.enabled {
+    background_analysis_pending_count(pool.inner(), Utc::now()).await
+}
+
+async fn background_analysis_pending_count(pool: &SqlitePool, now: DateTime<Utc>) -> Result<i64, String> {
+    if !configured_ai_assistance(pool).await?.enabled {
         return Ok(0);
     }
-    let today_start = chrono::Local::now()
+    let today_start = now.with_timezone(&chrono::Local)
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
@@ -772,14 +875,18 @@ pub async fn get_auto_analysis_pending_count(
         SELECT COUNT(*)
         FROM threads t
         LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ?
           AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+          AND (j.thread_id IS NULL OR j.status != 'failed' OR j.message_id != (
+              SELECT m.id FROM messages m WHERE m.thread_id = t.id ORDER BY m.sent_at DESC LIMIT 1
+          ))
         "#,
     )
     .bind(today_start)
-    .fetch_one(pool.inner())
+    .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())
 }
@@ -868,7 +975,11 @@ pub async fn record_review_decision(
     thread_id: String,
     decision: String,
 ) -> Result<(), String> {
-    if !matches!(decision.as_str(), "keep" | "follow_up" | "archived") {
+    save_review_decision(pool.inner(), &thread_id, &decision).await
+}
+
+async fn save_review_decision(pool: &SqlitePool, thread_id: &str, decision: &str) -> Result<(), String> {
+    if !matches!(decision, "keep" | "follow_up" | "archived") {
         return Err("invalid review decision".to_string());
     }
 
@@ -884,7 +995,7 @@ pub async fn record_review_decision(
     .bind(thread_id)
     .bind(decision)
     .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool.inner())
+    .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -927,10 +1038,14 @@ pub async fn complete_follow_up(
     pool: tauri::State<'_, SqlitePool>,
     thread_id: String,
 ) -> Result<(), String> {
+    complete_follow_up_for_thread(pool.inner(), &thread_id).await
+}
+
+async fn complete_follow_up_for_thread(pool: &SqlitePool, thread_id: &str) -> Result<(), String> {
     sqlx::query("UPDATE follow_ups SET status = 'completed', updated_at = ? WHERE thread_id = ?")
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(thread_id)
-        .execute(pool.inner())
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1017,4 +1132,120 @@ pub async fn get_thread_analysis(
         .fetch_optional(pool.inner())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod action_contract_tests {
+    use super::{
+        background_analysis_candidates, background_analysis_pending_count,
+        complete_follow_up_for_thread, save_review_decision, should_retry_without_calendar,
+        system_prompt,
+    };
+    use crate::commands::test_support::TestDatabase;
+    use chrono::{Duration, Utc};
+
+    #[tokio::test]
+    async fn keep_and_complete_are_local_only() {
+        let db = TestDatabase::new().await;
+        db.seed_thread("thread-local").await;
+        db.seed_active_follow_up("thread-local").await;
+
+        save_review_decision(&db.pool, "thread-local", "keep").await.unwrap();
+        complete_follow_up_for_thread(&db.pool, "thread-local").await.unwrap();
+
+        let decision: String = sqlx::query_scalar("SELECT decision FROM email_reviews WHERE thread_id = 'thread-local'").fetch_one(&db.pool).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-local'").fetch_one(&db.pool).await.unwrap();
+        let remote_operations: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-local') + (SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-local')").fetch_one(&db.pool).await.unwrap();
+        assert_eq!(decision, "keep");
+        assert_eq!(status, "completed");
+        assert_eq!(remote_operations, 0);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn background_candidates_are_recent_stale_inbox_threads_in_newest_first_order() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        let newest = (now - Duration::seconds(10)).to_rfc3339();
+        let next_newest = (now - Duration::seconds(20)).to_rfc3339();
+        let analyzed = (now - Duration::seconds(30)).to_rfc3339();
+        let queued = (now - Duration::seconds(40)).to_rfc3339();
+        let old = (now - Duration::days(1)).to_rfc3339();
+
+        for (thread_id, message_id, timestamp) in [
+            ("thread-newest", "message-newest", newest.as_str()),
+            ("thread-next", "message-next", next_newest.as_str()),
+            ("thread-analyzed", "message-analyzed", analyzed.as_str()),
+            ("thread-queued", "message-queued", queued.as_str()),
+            ("thread-old", "message-old", old.as_str()),
+        ] {
+            db.seed_thread(thread_id).await;
+            sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
+                .bind(timestamp)
+                .bind(thread_id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            db.seed_message_for_thread(message_id, thread_id, timestamp).await;
+        }
+
+        // A current analysis is not eligible; a durable remote operation is
+        // also excluded so the worker cannot analyze an item being removed.
+        sqlx::query("INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('thread-analyzed', ?)")
+            .bind(now.to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO mail_operations (id, account_id, thread_id, operation, status, next_retry_at, created_at, updated_at) VALUES ('operation-queued', 'account-1', 'thread-queued', 'archive', 'pending', ?, ?, ?)")
+            .bind(now.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let candidates = background_analysis_candidates(&db.pool, 2, now).await.unwrap();
+        let pending_count = background_analysis_pending_count(&db.pool, now).await.unwrap();
+
+        assert_eq!(
+            candidates.iter().map(|candidate| candidate.thread_id.as_str()).collect::<Vec<_>>(),
+            ["thread-newest", "thread-next"],
+        );
+        assert_eq!(pending_count, 2);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_ai_exposes_no_background_work() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        db.seed_thread("thread-disabled").await;
+        let timestamp = now.to_rfc3339();
+        sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = 'thread-disabled'")
+            .bind(&timestamp)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        db.seed_message_for_thread("message-disabled", "thread-disabled", &timestamp).await;
+        sqlx::query("INSERT INTO app_settings (key, value) VALUES ('ai_assistance_settings', '{\"enabled\":false}')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        assert!(background_analysis_candidates(&db.pool, 1, now).await.unwrap().is_empty());
+        assert_eq!(background_analysis_pending_count(&db.pool, now).await.unwrap(), 0);
+        db.close().await;
+    }
+
+    #[test]
+    fn calendar_prompt_is_compact_and_fallback_only_handles_invalid_json() {
+        let primary = system_prompt("", true);
+        let fallback = system_prompt("", false);
+        assert!(primary.contains("\"calendar_event\""));
+        assert!(primary.contains("\"location\""));
+        assert!(!primary.contains("\"description\""));
+        assert!(!fallback.contains("\"calendar_event\""));
+        assert!(should_retry_without_calendar("model did not return valid JSON (EOF)"));
+        assert!(!should_retry_without_calendar("could not reach Ollama"));
+    }
 }

@@ -152,19 +152,30 @@ struct ModelPayload {
     #[serde(default = "default_recommended_action")]
     recommended_action: String,
     #[serde(default)]
-    calendar_event: Option<CalendarEventDraft>,
+    calendar_event: Option<RawCalendarEvent>,
 }
 
 /// A provider-neutral, user-reviewable event candidate. It is deliberately
 /// data only: Google, Outlook, Apple Calendar, and ICS export are adapters.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct RawCalendarEvent {
+    title: String,
+    date_clues: Vec<String>,
+    time_text: String,
+    timezone_text: String,
+    duration_minutes: Option<i64>,
+    #[serde(default)]
+    location: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct CalendarEventDraft {
     title: String,
     start_at: String,
     end_at: String,
-    #[serde(default)]
     location: String,
-    #[serde(default)]
     description: String,
 }
 
@@ -262,7 +273,7 @@ async fn configured_ai_assistance(pool: &SqlitePool) -> Result<AiAssistanceSetti
 
 fn system_prompt(triage_preferences: &str, include_calendar_event: bool) -> String {
     let calendar_schema = if include_calendar_event {
-        ",\n  \"calendar_event\": {\"title\":\"...\",\"start_at\":\"RFC3339 with timezone\",\"end_at\":\"RFC3339 with timezone\",\"location\":\"...\"} or null"
+        ",\n  \"calendar_event\": {\"title\":\"...\",\"date_clues\":[\"exact words from email\"],\"time_text\":\"exact time\",\"timezone_text\":\"exact timezone\",\"duration_minutes\":number,\"location\":\"...\"} or null"
     } else {
         ""
     };
@@ -297,11 +308,11 @@ is_actionable to false, importance to 1 or 2, and action_items to []. Choose
 delete only for an unmistakably promotional or marketing email when the user's
 preferences support it; otherwise prefer archive for low-value email. Never
 recommend delete for an email with an attachment. Use review when uncertain.
-Only provide calendar_event when the email explicitly states both a date and a
-time for an event, including its timezone or offset. A confirmed registration,
-personal attendance instruction, or personal join link qualifies; a generic
-advertisement alone does not. Never invent a time, duration, attendees, or
-meeting link; use null when any required detail is uncertain."#.replace("{calendar_schema}", calendar_schema);
+Provide calendar_event for any concrete event that explicitly states a date,
+time, timezone or offset, and duration/end time. This is an optional “Event
+mentioned” suggestion for the user; it does not mean the recipient registered
+or must attend. Never invent a time, duration, attendees, or meeting link; use
+null when any required detail is uncertain."#.replace("{calendar_schema}", calendar_schema);
 
     if !triage_preferences.trim().is_empty() {
         prompt.push_str(
@@ -330,15 +341,30 @@ fn normalized_recommended_action(action: &str) -> String {
     }
 }
 
-fn normalized_calendar_event(event: Option<CalendarEventDraft>) -> Option<CalendarEventDraft> {
+fn source_contains(body: &str, value: &str) -> bool {
+    let normalize = |value: &str| value.to_ascii_lowercase().chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let value = normalize(value);
+    !value.is_empty() && normalize(body).contains(&value)
+}
+
+fn resolved_calendar_event(event: Option<RawCalendarEvent>, received_at: &str, body: &str) -> Option<CalendarEventDraft> {
     let event = event?;
     if event.title.trim().is_empty() { return None; }
-    let start = chrono::DateTime::parse_from_rfc3339(&event.start_at).ok()?;
-    let end = chrono::DateTime::parse_from_rfc3339(&event.end_at).ok()?;
-    if end <= start { return None; }
+    if event.date_clues.iter().any(|clue| !source_contains(body, clue))
+        || !source_contains(body, &event.time_text)
+        || !source_contains(body, &event.timezone_text) {
+        return None;
+    }
+    let received_at = chrono::DateTime::parse_from_rfc3339(received_at).ok()?.with_timezone(&chrono::Utc);
+    let clues = event.date_clues.iter().map(String::as_str).collect::<Vec<_>>();
+    let resolved = crate::calendar_resolver::resolve_free_text_event(
+        received_at, &clues, Some(&event.time_text), Some(&event.timezone_text), event.duration_minutes,
+    ).ok()?;
     Some(CalendarEventDraft {
         title: truncate(event.title.trim(), 160),
-        start_at: start.to_rfc3339(), end_at: end.to_rfc3339(),
+        start_at: resolved.start_at, end_at: resolved.end_at,
         location: truncate(event.location.trim(), 500),
         description: truncate(event.description.trim(), 2_000),
     })
@@ -430,11 +456,11 @@ fn should_retry_without_calendar(error: &str) -> bool {
 async fn latest_message_text(
     pool: &SqlitePool,
     thread_id: &str,
-) -> Result<(String, String, String, String, bool), String> {
+) -> Result<(String, String, String, String, bool, String), String> {
     // (from_name, from_email, subject, body, has_attachments)
-    let row: Option<(String, String, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+    let row: Option<(String, String, String, Option<String>, Option<String>, i64, String)> = sqlx::query_as(
         r#"
-        SELECT from_name, from_email, subject, body_text, body_html, has_attachments
+        SELECT from_name, from_email, subject, body_text, body_html, has_attachments, sent_at
         FROM messages
         WHERE thread_id = ?
         ORDER BY sent_at DESC
@@ -446,7 +472,7 @@ async fn latest_message_text(
     .await
     .map_err(|e| e.to_string())?;
 
-    let Some((from_name, from_email, subject, body_text, body_html, has_attachments_int)) = row else {
+    let Some((from_name, from_email, subject, body_text, body_html, has_attachments_int, received_at)) = row else {
         return Err(format!("no messages found for thread {}", thread_id));
     };
 
@@ -464,7 +490,7 @@ async fn latest_message_text(
         }
     };
 
-    Ok((from_name, from_email, subject, body, has_attachments_int != 0))
+    Ok((from_name, from_email, subject, body, has_attachments_int != 0, received_at))
 }
 
 /// Analyze a single thread and upsert the result into `email_analysis`.
@@ -511,7 +537,7 @@ pub(crate) async fn analyze_thread_with_pool(
         Some(_) => return Err("invalid analysis mode".to_string()),
     };
 
-    let (from_name, from_email, subject, body, has_attachments) =
+    let (from_name, from_email, subject, body, has_attachments, received_at) =
         latest_message_text(pool, thread_id).await?;
 
     let prompt = build_user_prompt(&from_name, &from_email, &subject, &body, has_attachments);
@@ -562,7 +588,17 @@ pub(crate) async fn analyze_thread_with_pool(
     } else {
         normalized_recommended_action(&payload.recommended_action)
     };
-    let calendar_event = normalized_calendar_event(payload.calendar_event);
+    let inferred_calendar = crate::calendar_resolver::extract_common_event_hints(&body).map(|hints| RawCalendarEvent {
+            title: subject.clone(),
+            date_clues: hints.date_clues,
+            time_text: hints.time,
+            timezone_text: hints.timezone,
+            duration_minutes: Some(hints.duration_minutes),
+            location: String::new(),
+            description: String::new(),
+        });
+    let calendar_event = resolved_calendar_event(payload.calendar_event, &received_at, &body)
+        .or_else(|| resolved_calendar_event(inferred_calendar, &received_at, &body));
     let calendar_event_json = calendar_event.as_ref().and_then(|event| serde_json::to_string(event).ok());
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -1244,6 +1280,7 @@ mod action_contract_tests {
         assert!(primary.contains("\"calendar_event\""));
         assert!(primary.contains("\"location\""));
         assert!(!primary.contains("\"description\""));
+        assert!(primary.contains("any concrete event"));
         assert!(!fallback.contains("\"calendar_event\""));
         assert!(should_retry_without_calendar("model did not return valid JSON (EOF)"));
         assert!(!should_retry_without_calendar("could not reach Ollama"));

@@ -1,3 +1,4 @@
+mod calendar_resolver;
 mod commands;
 
 use commands::{agent, auth, compose, db, splits, sync, triage_worker};

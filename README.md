@@ -13,7 +13,7 @@ It is designed for people who want to triage an inbox quickly: sync recent mail,
 - Supports archive, delete, star, search, replies, split inboxes, and keyboard navigation.
 - Runs local AI email triage through Ollama. The default model is `gemma4:e4b`.
 - Displays an AI summary, action items, importance score, severity, and deadline when available.
-- Gradually analyzes at most one eligible email per sync cycle (once per minute), limited to unarchived Inbox mail received today.
+- Uses a durable Rust background worker to analyze eligible unarchived Inbox mail received today, one email at a time. It survives app restarts and never waits for the UI to remain focused.
 - Includes a human-approved review queue: the model suggests context, but you choose whether to keep, follow up on, or archive a message.
 
 ## Install a release
@@ -111,9 +111,11 @@ Never commit an App Password, credentials file, or local database to Git.
 
 ## AI triage and review queue
 
-The AI feature sends the sender, subject, and email body to the Ollama server running on your own machine. It asks the model to return structured JSON with a category, summary, action items, importance score (1–5), and an optional deadline.
+The AI feature sends the sender, subject, and email body to the Ollama server running on your own machine. It asks the model to return structured JSON with a category, summary, action items, importance score (1–5), optional deadline, and optional calendar candidate.
 
-Background analysis is deliberately rate-limited: it processes one new eligible email at a time after each inbox sync. You can also use **Analyze** on an open email to prioritize that specific thread.
+Background analysis is deliberately rate-limited: Rust processes one eligible email at a time after sync/IMAP-IDLE wake-ups, using durable local jobs, retries, and a lease to prevent duplicate model calls. You can also use **Analyze** on an open email to prioritize that specific thread.
+
+When an email contains a confirmed event with an explicit date, time, and timezone, the preview may offer a calendar candidate. It opens a prefilled Google Calendar page or downloads an `.ics` file; it never creates a remote calendar event automatically.
 
 The **Review** view is approval-first:
 
@@ -163,6 +165,7 @@ npm run tauri build
 
 - Gmail only; IMAP settings are not configurable.
 - Google OAuth currently supports the configured testing project only; public distribution will require completing Google's verification process for the Gmail scope.
-- No calendar integration, reminders, or automatic actions.
+- Calendar support is an early, opt-in export prototype: Google Calendar links and `.ics` downloads only. It does not create remote events.
+- Background triage terminal-failure UI and manual retry controls are still being refined.
 - Review decisions are local to this app and are not synced back to Gmail.
 - The project does not yet include a license file. Add an explicit license before publishing or accepting contributions.

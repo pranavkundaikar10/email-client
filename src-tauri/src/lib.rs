@@ -96,6 +96,7 @@ pub fn run() {
             agent::set_thinking_settings,
             agent::get_auto_analysis_candidates,
             agent::get_auto_analysis_pending_count,
+            agent::enqueue_backlog_triage,
             triage_worker::process_background_triage,
             agent::get_review_queue,
             agent::record_review_decision,

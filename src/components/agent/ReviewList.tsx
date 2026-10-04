@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import ThreadItem from "../email/ThreadItem";
@@ -26,7 +26,8 @@ function dueTone(dueAt: string) {
   return new Date(dueAt) < new Date() ? "text-red-600" : "text-amber-700";
 }
 
-export default function ReviewList() {
+export default function ReviewList({ accountId }: { accountId: string }) {
+  const queryClient = useQueryClient();
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const checkedThreadIds = useAppStore((s) => s.checkedThreadIds);
@@ -37,6 +38,7 @@ export default function ReviewList() {
   const { setStarred } = useMailFlags();
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [sort, setSort] = useState<"priority" | "newest" | "oldest">("priority");
+  const [queueingBacklog, setQueueingBacklog] = useState(false);
   const { data: queue = [], isLoading } = useQuery({
     queryKey: ["review_queue", sort],
     queryFn: () => api.getReviewQueue(50, sort),
@@ -114,6 +116,28 @@ export default function ReviewList() {
     catch (error) { addToast(`Could not queue delete: ${String(error)}`); }
   }
 
+  async function queueOlderEmails() {
+    if (!accountId) return;
+    setQueueingBacklog(true);
+    try {
+      const result = await api.enqueueBacklogTriage(accountId);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] }),
+        queryClient.invalidateQueries({ queryKey: ["threads", accountId] }),
+      ]);
+      if (result.queued > 0) {
+        addToast(`${result.queued} older ${result.queued === 1 ? "email" : "emails"} queued for review`);
+      } else {
+        addToast("No older unreviewed inbox emails found");
+      }
+    } catch (error) {
+      addToast(`Could not prepare older emails: ${String(error)}`);
+    } finally {
+      setQueueingBacklog(false);
+    }
+  }
+
   function renderItems(items: ReviewSidebarItem[], followUp = false) {
     return items.map((item) => <div
       key={item.thread_id}
@@ -150,6 +174,14 @@ export default function ReviewList() {
         <Check size={22} className="text-emerald-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
         <p className="mt-1 text-xs text-gray-400">{aiAssistanceSettings.enabled ? "New analyzed emails will appear here automatically." : "New inbox emails will appear here for review."}</p>
+        {aiAssistanceSettings.enabled && <button
+          type="button"
+          disabled={!accountId || queueingBacklog}
+          onClick={() => void queueOlderEmails()}
+          className="mt-5 rounded-md border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60"
+        >
+          {queueingBacklog ? "Finding older emails…" : "Review next 20 older emails"}
+        </button>}
       </>}
     </div>;
   }
@@ -196,7 +228,7 @@ export default function ReviewList() {
       {renderItems(today)}
     </>}
     {earlier.length > 0 && <>
-      <p className="border-y border-gray-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Earlier · {earlier.length}</p>
+      <p className="border-y border-gray-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Older · {earlier.length}</p>
       {renderItems(earlier)}
     </>}
     </div>

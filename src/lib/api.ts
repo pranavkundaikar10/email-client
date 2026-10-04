@@ -36,6 +36,11 @@ export interface Message {
   has_attachments: boolean;
 }
 
+export interface BacklogTriageResult {
+  queued: number;
+  headers_discovered: number;
+}
+
 export interface EmailAttachment {
   id: string;
   message_id: string;
@@ -285,6 +290,9 @@ export const api = {
 
   getAutoAnalysisPendingCount: () =>
     invoke<number>("get_auto_analysis_pending_count"),
+
+  enqueueBacklogTriage: (accountId: string) =>
+    invoke<BacklogTriageResult>("enqueue_backlog_triage", { accountId }),
 
   processBackgroundTriage: () =>
     invoke<void>("process_background_triage"),

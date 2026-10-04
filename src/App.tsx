@@ -411,7 +411,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
               isSearching
-            /> : activeView === "review" ? <ReviewList /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
+            /> : activeView === "review" ? <ReviewList accountId={accountContext?.id ?? ""} /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
               accountId={accountContext?.id ?? ""}
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}

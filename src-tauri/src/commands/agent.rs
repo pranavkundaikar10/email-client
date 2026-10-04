@@ -49,6 +49,15 @@ pub struct AutoAnalysisCandidate {
     pub message_received_at: String,
 }
 
+/// Result of explicitly adding a small older-email batch to the durable local
+/// triage queue. Header discovery is read-only; `queued` is the number of
+/// messages that will subsequently have their body fetched and analyzed.
+#[derive(Debug, Serialize)]
+pub struct BacklogTriageResult {
+    pub queued: usize,
+    pub headers_discovered: usize,
+}
+
 /// User-controlled thinking behavior for the two analysis workloads. Manual
 /// analysis favors depth by default; the background review queue favors a
 /// responsive, low-impact laptop experience by default.
@@ -881,13 +890,130 @@ pub(crate) async fn background_analysis_candidates(
     .map_err(|e| e.to_string())
 }
 
+/// Newest unreviewed messages for an explicit historical-review batch. Unlike
+/// automatic triage, this intentionally has no received-today cutoff. It is
+/// account-scoped so one account can never enqueue another account's mail.
+pub(crate) async fn backlog_analysis_candidates(
+    pool: &SqlitePool,
+    account_id: &str,
+    limit: i64,
+) -> Result<Vec<AutoAnalysisCandidate>, String> {
+    sqlx::query_as::<_, AutoAnalysisCandidate>(
+        r#"
+        SELECT t.id AS thread_id, m.id AS message_id, t.last_message_at AS message_received_at
+        FROM threads t
+        JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN email_reviews r ON r.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
+        WHERE t.account_id = ? AND t.folder = 'inbox' AND t.archived = 0
+          AND r.thread_id IS NULL
+          AND j.thread_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+          AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+        ORDER BY t.last_message_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(account_id)
+    .bind(limit.clamp(1, 20))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn oldest_cached_inbox_timestamp(pool: &SqlitePool, account_id: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
+        "SELECT MIN(last_message_at) FROM threads WHERE account_id = ? AND folder = 'inbox'",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Persist a selected batch before starting any model work. Kept separate
+/// from remote header discovery so it can be tested against real SQLite
+/// migrations without Gmail or an Ollama process.
+pub(crate) async fn enqueue_backlog_triage_candidates(
+    pool: &SqlitePool,
+    account_id: &str,
+    limit: i64,
+    now: DateTime<Utc>,
+) -> Result<usize, String> {
+    let candidates = backlog_analysis_candidates(pool, account_id, limit).await?;
+    for candidate in &candidates {
+        let received_at = DateTime::parse_from_rfc3339(&candidate.message_received_at)
+            .map_err(|_| "backlog candidate has an invalid received timestamp".to_string())?
+            .with_timezone(&Utc);
+        crate::commands::triage_worker::enqueue_triage_job(
+            pool,
+            &candidate.thread_id,
+            &candidate.message_id,
+            received_at,
+            now,
+        )
+        .await?;
+    }
+    Ok(candidates.len())
+}
+
+/// Add the next twenty newest unreviewed inbox emails for this account. If
+/// the local header cache is too shallow, it reads bounded older-header pages
+/// from Gmail first. Neither discovery nor triage changes Gmail mail state.
+#[tauri::command]
+pub async fn enqueue_backlog_triage(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, crate::commands::triage_worker::BackgroundTriageWorker>,
+    account_id: String,
+) -> Result<BacklogTriageResult, String> {
+    if !background_triage_enabled(pool.inner()).await? {
+        return Err("AI assistance is turned off in Settings".to_string());
+    }
+
+    const BATCH_SIZE: i64 = 20;
+    const MAX_DISCOVERY_PAGES: usize = 5;
+    let mut headers_discovered = 0;
+    for _ in 0..MAX_DISCOVERY_PAGES {
+        if backlog_analysis_candidates(pool.inner(), &account_id, BATCH_SIZE).await?.len() >= BATCH_SIZE as usize {
+            break;
+        }
+        let Some(before_date) = oldest_cached_inbox_timestamp(pool.inner(), &account_id).await? else {
+            return Err("No local inbox headers yet. Wait for the initial inbox sync, then try again.".to_string());
+        };
+        let fetched = crate::commands::sync::sync_older_for_account(
+            &app,
+            pool.inner(),
+            &account_id,
+            &before_date,
+        )
+        .await?;
+        headers_discovered += fetched;
+        if fetched == 0 {
+            break;
+        }
+    }
+
+    let queued = enqueue_backlog_triage_candidates(pool.inner(), &account_id, BATCH_SIZE, Utc::now()).await?;
+    if queued > 0 {
+        crate::commands::triage_worker::start_background_triage(
+            app,
+            pool.inner().clone(),
+            worker.inner().clone(),
+        );
+    }
+    Ok(BacklogTriageResult { queued, headers_discovered })
+}
+
 pub(crate) async fn background_triage_enabled(pool: &SqlitePool) -> Result<bool, String> {
     Ok(configured_ai_assistance(pool).await?.enabled)
 }
 
-/// Count the same received-today inbox threads eligible for background
-/// analysis. The Review UI uses this to distinguish an empty queue from one
-/// that is still being prepared by the local model.
+/// Count all currently waiting background work: unqueued received-today mail
+/// plus durable jobs from user-requested historical batches. The Review UI
+/// uses this to distinguish an empty queue from one still being prepared.
 #[tauri::command]
 pub async fn get_auto_analysis_pending_count(
     pool: tauri::State<'_, SqlitePool>,
@@ -906,19 +1032,32 @@ async fn background_analysis_pending_count(pool: &SqlitePool, now: DateTime<Utc>
         .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
         .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
 
+    // Count both unqueued current-mail candidates and durable worker jobs.
+    // Historical batches are represented only by jobs, so limiting this to
+    // today's discovery query incorrectly made Review look caught up while a
+    // user-requested backlog was still being processed.
     sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT COUNT(*)
-        FROM threads t
-        LEFT JOIN email_analysis a ON a.thread_id = t.id
-        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
-        WHERE t.folder = 'inbox' AND t.archived = 0
-          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
-          AND t.last_message_at >= ?
-          AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
-          AND (j.thread_id IS NULL OR j.status != 'failed' OR j.message_id != (
-              SELECT m.id FROM messages m WHERE m.thread_id = t.id ORDER BY m.sent_at DESC LIMIT 1
-          ))
+        SELECT COUNT(*) FROM (
+          SELECT t.id AS thread_id
+          FROM threads t
+          LEFT JOIN email_analysis a ON a.thread_id = t.id
+          LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
+          WHERE t.folder = 'inbox' AND t.archived = 0
+            AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+            AND t.last_message_at >= ?
+            AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
+            AND j.thread_id IS NULL
+
+          UNION
+
+          SELECT j.thread_id
+          FROM background_triage_jobs j
+          JOIN threads t ON t.id = j.thread_id
+          WHERE j.status IN ('pending', 'leased')
+            AND t.folder = 'inbox' AND t.archived = 0
+            AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+        )
         "#,
     )
     .bind(today_start)
@@ -927,16 +1066,24 @@ async fn background_analysis_pending_count(pool: &SqlitePool, now: DateTime<Utc>
     .map_err(|e| e.to_string())
 }
 
-/// The review queue shows the newest seven-day block with unresolved analyzed
-/// inbox threads. Once it is cleared, it automatically moves to the next older
-/// block without causing the background analyzer to process old mail.
+/// All unresolved analyzed inbox threads, including a user-requested older
+/// batch. The UI groups them as Today and Older; it must not hide older ready
+/// items merely because newer ones exist in a separate seven-day window.
 #[tauri::command]
 pub async fn get_review_queue(
     pool: tauri::State<'_, SqlitePool>,
     limit: Option<i64>,
     sort: Option<String>,
 ) -> Result<Vec<ReviewItem>, String> {
-    let ai_assistance_enabled = configured_ai_assistance(pool.inner()).await?.enabled;
+    review_queue_for_pool(pool.inner(), limit, sort).await
+}
+
+async fn review_queue_for_pool(
+    pool: &SqlitePool,
+    limit: Option<i64>,
+    sort: Option<String>,
+) -> Result<Vec<ReviewItem>, String> {
+    let ai_assistance_enabled = configured_ai_assistance(pool).await?.enabled;
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let order_by = match sort.as_deref() {
         Some("oldest") => "t.last_message_at ASC",
@@ -944,13 +1091,6 @@ pub async fn get_review_queue(
         _ if ai_assistance_enabled => "a.importance DESC, t.last_message_at DESC",
         _ => "t.last_message_at DESC",
     };
-    let mut review_window_start = (chrono::Local::now() - chrono::Duration::days(6))
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
-        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
-
     let query = r#"
         SELECT t.id AS thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
                t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
@@ -971,7 +1111,6 @@ pub async fn get_review_queue(
         LEFT JOIN email_reviews r ON r.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
-          AND t.last_message_at >= ? AND t.last_message_at < ?
           AND r.thread_id IS NULL
           AND (? = 0 OR a.thread_id IS NOT NULL)
         ORDER BY {order_by}
@@ -979,30 +1118,12 @@ pub async fn get_review_queue(
         "#
         .replace("{order_by}", order_by);
 
-    let mut review_window_end = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
-    // At most five years of weekly windows. The usual path is one query, and
-    // this makes clearing a batch naturally reveal the next unresolved batch.
-    for _ in 0..261 {
-        let rows = sqlx::query_as::<_, ReviewItem>(&query)
-            .bind(&review_window_start)
-            .bind(&review_window_end)
-            .bind(if ai_assistance_enabled { 1 } else { 0 })
-            .bind(limit)
-            .fetch_all(pool.inner())
-            .await
-            .map_err(|e| e.to_string())?;
-        if !rows.is_empty() {
-            return Ok(rows);
-        }
-
-        review_window_end = review_window_start;
-        let previous_start = chrono::DateTime::parse_from_rfc3339(&review_window_end)
-            .map(|time| (time - chrono::Duration::days(7)).to_rfc3339())
-            .unwrap_or_else(|_| (chrono::Utc::now() - chrono::Duration::days(13)).to_rfc3339());
-        review_window_start = previous_start;
-    }
-
-    Ok(Vec::new())
+    sqlx::query_as::<_, ReviewItem>(&query)
+        .bind(if ai_assistance_enabled { 1 } else { 0 })
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1174,8 +1295,9 @@ pub async fn get_thread_analysis(
 mod action_contract_tests {
     use super::{
         background_analysis_candidates, background_analysis_pending_count,
-        complete_follow_up_for_thread, save_review_decision, should_retry_without_calendar,
-        system_prompt,
+        backlog_analysis_candidates, complete_follow_up_for_thread,
+        enqueue_backlog_triage_candidates, save_review_decision,
+        review_queue_for_pool, should_retry_without_calendar, system_prompt,
     };
     use crate::commands::test_support::TestDatabase;
     use chrono::{Duration, Utc};
@@ -1270,6 +1392,93 @@ mod action_contract_tests {
 
         assert!(background_analysis_candidates(&db.pool, 1, now).await.unwrap().is_empty());
         assert_eq!(background_analysis_pending_count(&db.pool, now).await.unwrap(), 0);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn backlog_batch_is_newest_first_account_scoped_and_read_only() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        for index in 0..24 {
+            let thread = format!("backlog-{index:02}");
+            let message = format!("backlog-message-{index:02}");
+            let timestamp = (now - Duration::minutes(index)).to_rfc3339();
+            db.seed_thread(&thread).await;
+            sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
+                .bind(&timestamp).bind(&thread).execute(&db.pool).await.unwrap();
+            db.seed_message_for_thread(&message, &thread, &timestamp).await;
+        }
+        db.seed_account("account-2", "other@example.com").await;
+        db.seed_thread_for_account("other-account-newest", "account-2").await;
+        db.seed_message_for_thread("other-account-message", "other-account-newest", &now.to_rfc3339()).await;
+
+        // These must not enter a historical review batch.
+        sqlx::query("INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('backlog-00', ?)")
+            .bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+        save_review_decision(&db.pool, "backlog-01", "keep").await.unwrap();
+        sqlx::query("UPDATE threads SET archived = 1 WHERE id = 'backlog-02'")
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO mail_operations (id, account_id, thread_id, operation, status, next_retry_at, created_at, updated_at) VALUES ('backlog-operation', 'account-1', 'backlog-03', 'archive', 'pending', ?, ?, ?)")
+            .bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(now.to_rfc3339())
+            .execute(&db.pool).await.unwrap();
+
+        let candidates = backlog_analysis_candidates(&db.pool, "account-1", 20).await.unwrap();
+        assert_eq!(candidates.len(), 20);
+        assert_eq!(candidates.first().unwrap().thread_id, "backlog-04");
+        assert_eq!(candidates.last().unwrap().thread_id, "backlog-23");
+        assert!(!candidates.iter().any(|item| item.thread_id == "other-account-newest"));
+
+        let queued = enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now).await.unwrap();
+        assert_eq!(queued, 20);
+        assert_eq!(
+            enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now).await.unwrap(),
+            0,
+            "repeating the action must not duplicate durable triage jobs",
+        );
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM background_triage_jobs")
+            .fetch_one(&db.pool).await.unwrap();
+        let mail_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(jobs, 20);
+        assert_eq!(mail_operations, 1, "backlog selection must not create Gmail operations");
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn review_queue_keeps_ready_older_mail_visible_alongside_today() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        for (thread_id, message_id, timestamp) in [
+            ("review-today", "review-today-message", now.to_rfc3339()),
+            ("review-older", "review-older-message", (now - Duration::days(12)).to_rfc3339()),
+        ] {
+            db.seed_thread(thread_id).await;
+            sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
+                .bind(&timestamp).bind(thread_id).execute(&db.pool).await.unwrap();
+            db.seed_message_for_thread(message_id, thread_id, &timestamp).await;
+            sqlx::query("INSERT INTO email_analysis (thread_id, importance, analyzed_at) VALUES (?, 3, ?)")
+                .bind(thread_id).bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+        }
+
+        let rows = review_queue_for_pool(&db.pool, Some(50), Some("newest".to_string())).await.unwrap();
+        assert_eq!(rows.iter().map(|row| row.thread_id.as_str()).collect::<Vec<_>>(), ["review-today", "review-older"]);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_count_includes_historical_durable_jobs() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        let received_at = now - Duration::days(12);
+        db.seed_thread("historical-pending").await;
+        sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = 'historical-pending'")
+            .bind(received_at.to_rfc3339()).execute(&db.pool).await.unwrap();
+        db.seed_message_for_thread("historical-pending-message", "historical-pending", &received_at.to_rfc3339()).await;
+        crate::commands::triage_worker::enqueue_triage_job(
+            &db.pool, "historical-pending", "historical-pending-message", received_at, now,
+        ).await.unwrap();
+
+        assert_eq!(background_analysis_pending_count(&db.pool, now).await.unwrap(), 1);
         db.close().await;
     }
 

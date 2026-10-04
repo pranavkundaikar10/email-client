@@ -568,10 +568,22 @@ pub async fn sync_older(
     account_id: String,
     before_date: String,
 ) -> Result<usize, String> {
+    sync_older_for_account(&app, pool.inner(), &account_id, &before_date).await
+}
+
+/// Read one bounded page of older INBOX headers for an account. This is shared
+/// by infinite scrolling and the review-backlog chooser; it never fetches a
+/// body or changes a Gmail flag.
+pub(crate) async fn sync_older_for_account(
+    app: &tauri::AppHandle,
+    pool: &SqlitePool,
+    account_id: &str,
+    before_date: &str,
+) -> Result<usize, String> {
     eprintln!("Older email sync: resolving account");
-    let email = crate::commands::auth::account_email_for_id(&app, &account_id)?;
+    let email = crate::commands::auth::account_email_for_id(app, account_id)?;
     eprintln!("Older email sync: refreshing Gmail credentials");
-    let auth = crate::commands::auth::get_gmail_auth(&app, &email).await?;
+    let auth = crate::commands::auth::get_gmail_auth(app, &email).await?;
     let email_for_imap = email.clone();
 
     // Gmail's INTERNALDATE is persisted as RFC 3339. IMAP's BEFORE search
@@ -593,7 +605,7 @@ pub async fn sync_older(
     .map_err(|e| e.to_string())??;
 
     eprintln!("Older email sync: writing {} messages to the local database", metas.len());
-    write_metas_to_db(pool.inner(), &account_id, &email, "inbox", metas).await
+    write_metas_to_db(pool, account_id, &email, "inbox", metas).await
 }
 
 #[tauri::command]

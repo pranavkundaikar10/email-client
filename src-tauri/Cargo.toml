@@ -23,6 +23,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4"] }
 imap = "2"
 native-tls = "0.2"
@@ -35,3 +36,4 @@ dotenvy = "0.15"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
 sha2 = "0.10"
 url = "2"
+regex = "1"

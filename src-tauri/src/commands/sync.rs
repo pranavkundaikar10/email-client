@@ -1019,6 +1019,57 @@ fn resolve_uids(session: &mut ImapSession, rows: &[(String, String)]) -> Result<
     Ok(uids)
 }
 
+/// Returns true only when every message in a thread can be found in the
+/// destination mailbox by RFC Message-ID. A missing Message-ID is treated as
+/// unknown rather than assuming a delete completed, which is safer than a
+/// false positive for local purging.
+async fn imap_thread_is_in_special_mailbox(
+    app: &tauri::AppHandle,
+    pool: &SqlitePool,
+    thread_id: &str,
+    special_attr: &'static str,
+    fallback: &'static str,
+) -> Result<bool, String> {
+    let account_id: String = sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
+    )
+    .bind(thread_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+
+    let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
+    let email = crate::commands::auth::account_email_for_id(app, &account_id)?;
+    tokio::task::spawn_blocking(move || {
+        let mut session = connect(&email, &auth)?;
+        let mailbox = find_special_mailbox(&mut session, special_attr)
+            .unwrap_or_else(|| fallback.to_string());
+        session.select(&mailbox).map_err(|e| e.to_string())?;
+        let found_every_message = rows.iter().all(|(message_id, stored_uid)| {
+            // When the original header had no Message-ID, the local id is the
+            // source-mailbox UID and cannot safely identify a moved message.
+            !message_id.is_empty()
+                && message_id != stored_uid
+                && session
+                    .uid_search(format!("HEADER MESSAGE-ID \"{}\"", message_id))
+                    .map(|uids| !uids.is_empty())
+                    .unwrap_or(false)
+        });
+        session.logout().ok();
+        Ok::<_, String>(found_every_message)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // special_attr: RFC 6154 attribute to resolve destination dynamically, e.g. "\\Trash", "\\All"
 // fallback: hardcoded name used if attribute lookup fails
 async fn imap_move_thread(
@@ -1164,6 +1215,7 @@ struct MailOperation {
     thread_id: String,
     operation: String,
     attempt_count: i64,
+    remote_attempted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1177,6 +1229,14 @@ trait MailDelivery {
         thread_id: &'a str,
         action: MailDeliveryAction,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Read-only reconciliation used before replaying a Trash move. A lost
+    /// IMAP response must not cause an already-trashed message to be treated
+    /// as a failed deletion on the next app session.
+    fn thread_is_in_trash<'a>(
+        &'a self,
+        thread_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
 }
 
 struct ImapMailDelivery<'a> {
@@ -1193,6 +1253,15 @@ impl MailDelivery for ImapMailDelivery<'_> {
             }
         })
     }
+
+    fn thread_is_in_trash<'a>(
+        &'a self,
+        thread_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async move {
+            imap_thread_is_in_special_mailbox(self.app, self.pool, thread_id, "\\Trash", "[Gmail]/Trash").await
+        })
+    }
 }
 
 async fn dispatch_mail_delivery<D: MailDelivery>(delivery: &D, item: &MailOperation) -> Result<(), String> {
@@ -1202,6 +1271,16 @@ async fn dispatch_mail_delivery<D: MailDelivery>(delivery: &D, item: &MailOperat
         _ => return Err("Unknown queued mail operation".to_string()),
     };
     delivery.deliver(&item.thread_id, action).await
+}
+
+/// A Trash move is at-least-once across app sleep and network loss. Check the
+/// destination first so an earlier successful move whose IMAP response was
+/// lost is confirmed locally instead of replayed from the source mailbox.
+async fn deliver_or_confirm_mail_operation<D: MailDelivery>(delivery: &D, item: &MailOperation) -> Result<(), String> {
+    if item.operation == "trash" && item.remote_attempted_at.is_some() && delivery.thread_is_in_trash(&item.thread_id).await? {
+        return Ok(());
+    }
+    dispatch_mail_delivery(delivery, item).await
 }
 
 #[derive(sqlx::FromRow)]
@@ -1246,6 +1325,7 @@ async fn enqueue_mail_operation(
              operation = excluded.operation,
              status = 'pending',
              attempt_count = 0,
+             remote_attempted_at = CASE WHEN mail_operations.operation != excluded.operation THEN NULL ELSE mail_operations.remote_attempted_at END,
              next_retry_at = excluded.next_retry_at,
              last_error = NULL,
              updated_at = excluded.updated_at"#,
@@ -1389,13 +1469,9 @@ pub async fn process_mail_operations(
     let _guard = worker.lock.lock().await;
     let now = Utc::now().to_rfc3339();
 
-    // A process may have stopped while IMAP was in flight. It is safe to retry
-    // that operation, and avoids a permanently hidden thread after restart.
-    sqlx::query("UPDATE mail_operations SET status = 'pending', updated_at = ? WHERE status = 'in_progress'")
-        .bind(&now)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    // A process may have stopped while IMAP was in flight. Before replaying a
+    // recovered Trash operation, delivery reconciliation checks Gmail Trash.
+    recover_interrupted_mail_operations(pool, &now).await?;
     sqlx::query("UPDATE mail_flag_operations SET status = 'pending', updated_at = ? WHERE status = 'in_progress'")
         .bind(&now)
         .execute(pool)
@@ -1403,7 +1479,7 @@ pub async fn process_mail_operations(
         .map_err(|e| e.to_string())?;
 
     let item: Option<MailOperation> = sqlx::query_as(
-        "SELECT id, thread_id, operation, attempt_count FROM mail_operations \
+        "SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations \
          WHERE status = 'pending' AND next_retry_at <= ? ORDER BY created_at ASC LIMIT 1",
     )
     .bind(&now)
@@ -1414,7 +1490,8 @@ pub async fn process_mail_operations(
         return process_mail_flag_operation(app, pool, &now).await;
     };
 
-    sqlx::query("UPDATE mail_operations SET status = 'in_progress', updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE mail_operations SET status = 'in_progress', remote_attempted_at = COALESCE(remote_attempted_at, ?), updated_at = ? WHERE id = ?")
+        .bind(&now)
         .bind(&now)
         .bind(&item.id)
         .execute(pool)
@@ -1422,11 +1499,20 @@ pub async fn process_mail_operations(
         .map_err(|e| e.to_string())?;
 
     let delivery = ImapMailDelivery { app, pool };
-    let result = dispatch_mail_delivery(&delivery, &item).await;
+    let result = deliver_or_confirm_mail_operation(&delivery, &item).await;
 
     if let Some(failure) = settle_mail_operation_result(pool, &item, result).await? {
         let _ = app.emit("mail-operation-failed", failure);
     }
+    Ok(())
+}
+
+async fn recover_interrupted_mail_operations(pool: &SqlitePool, now: &str) -> Result<(), String> {
+    sqlx::query("UPDATE mail_operations SET status = 'pending', updated_at = ? WHERE status = 'in_progress'")
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1439,16 +1525,30 @@ async fn settle_mail_operation_result(
 ) -> Result<Option<MailOperationFailure>, String> {
     match result {
         Ok(()) => {
-            sqlx::query("UPDATE threads SET archived = 1 WHERE id = ?")
+            // Inbox visibility uses the existing shared `archived` flag, but
+            // retain the confirmed remote Trash timestamp separately. This
+            // distinguishes a user deletion from an ordinary archive without
+            // guessing about older historical records.
+            // The cached deletion marker and outbox removal must commit as a
+            // unit. A shutdown between two separate statements could make a
+            // confirmed remote deletion look pending after restart.
+            let confirmed_at = Utc::now().to_rfc3339();
+            let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+            sqlx::query(
+                "UPDATE threads SET archived = 1, trashed_at = CASE WHEN ? = 'trash' THEN ? ELSE NULL END WHERE id = ?",
+            )
+                .bind(&item.operation)
+                .bind(&confirmed_at)
                 .bind(&item.thread_id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(|e| e.to_string())?;
             sqlx::query("DELETE FROM mail_operations WHERE id = ?")
                 .bind(&item.id)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(|e| e.to_string())?;
+            transaction.commit().await.map_err(|e| e.to_string())?;
             Ok(None)
         }
         Err(error) => {
@@ -1911,18 +2011,29 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_pending_mail_operations, dispatch_mail_delivery, enqueue_mail_flag_operation, enqueue_mail_operation, html_visible_content_score, settle_mail_operation_result, MailDelivery, MailDeliveryAction, MailOperation};
+    use super::{cancel_pending_mail_operations, deliver_or_confirm_mail_operation, dispatch_mail_delivery, enqueue_mail_flag_operation, enqueue_mail_operation, html_visible_content_score, recover_interrupted_mail_operations, settle_mail_operation_result, MailDelivery, MailDeliveryAction, MailOperation};
     use crate::commands::test_support::TestDatabase;
     use std::{future::Future, pin::Pin, sync::Mutex};
 
     #[derive(Default)]
-    struct FakeMailDelivery(Mutex<Vec<(String, MailDeliveryAction)>>);
+    struct FakeMailDelivery {
+        deliveries: Mutex<Vec<(String, MailDeliveryAction)>>,
+        in_trash: bool,
+        trash_checks: Mutex<usize>,
+    }
 
     impl MailDelivery for FakeMailDelivery {
         fn deliver<'a>(&'a self, thread_id: &'a str, action: MailDeliveryAction) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
-                self.0.lock().unwrap().push((thread_id.to_string(), action));
+                self.deliveries.lock().unwrap().push((thread_id.to_string(), action));
                 Ok(())
+            })
+        }
+
+        fn thread_is_in_trash<'a>(&'a self, _thread_id: &'a str) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+            Box::pin(async move {
+                *self.trash_checks.lock().unwrap() += 1;
+                Ok(self.in_trash)
             })
         }
     }
@@ -1970,6 +2081,102 @@ mod tests {
         assert_eq!(operation, "trash");
         assert_eq!(flag_count, 0);
         assert_eq!(follow_up, "completed");
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_trash_is_distinguished_from_an_archive_locally() {
+        let db = TestDatabase::new().await;
+        db.seed_thread("thread-confirmed-trash").await;
+        db.seed_thread("thread-confirmed-archive").await;
+
+        enqueue_mail_operation(&db.pool, "thread-confirmed-trash", "trash").await.unwrap();
+        let trash: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-confirmed-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        settle_mail_operation_result(&db.pool, &trash, Ok(())).await.unwrap();
+
+        enqueue_mail_operation(&db.pool, "thread-confirmed-archive", "archive").await.unwrap();
+        let archive: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-confirmed-archive'")
+            .fetch_one(&db.pool).await.unwrap();
+        settle_mail_operation_result(&db.pool, &archive, Ok(())).await.unwrap();
+
+        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        let archived_trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-archive'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert!(trashed_at.is_some());
+        assert_eq!(archived_trashed_at, None);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn interrupted_trash_is_recovered_by_reconciling_before_replay() {
+        let db = TestDatabase::new().await;
+        db.seed_thread("thread-uncertain-trash").await;
+        enqueue_mail_operation(&db.pool, "thread-uncertain-trash", "trash").await.unwrap();
+        let mut item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-uncertain-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        item.remote_attempted_at = Some("2026-10-04T00:00:00+00:00".to_string());
+
+        // Models a server-side MOVE that succeeded just before the laptop
+        // lost its connection and therefore never received the IMAP response.
+        let delivery = FakeMailDelivery { deliveries: Mutex::new(Vec::new()), in_trash: true, trash_checks: Mutex::new(0) };
+        deliver_or_confirm_mail_operation(&delivery, &item).await.unwrap();
+        settle_mail_operation_result(&db.pool, &item, Ok(())).await.unwrap();
+
+        assert!(delivery.deliveries.lock().unwrap().is_empty(), "must not replay a confirmed Trash move");
+        assert_eq!(*delivery.trash_checks.lock().unwrap(), 1);
+        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-uncertain-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-uncertain-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert!(trashed_at.is_some());
+        assert_eq!(operations, 0);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_trash_delivery_does_not_do_an_extra_reconciliation_round_trip() {
+        let item = MailOperation {
+            id: "operation-fresh".to_string(), thread_id: "thread-fresh".to_string(),
+            operation: "trash".to_string(), attempt_count: 0, remote_attempted_at: None,
+        };
+        let delivery = FakeMailDelivery { deliveries: Mutex::new(Vec::new()), in_trash: false, trash_checks: Mutex::new(0) };
+        deliver_or_confirm_mail_operation(&delivery, &item).await.unwrap();
+        assert_eq!(*delivery.trash_checks.lock().unwrap(), 0);
+        assert_eq!(*delivery.deliveries.lock().unwrap(), vec![("thread-fresh".to_string(), MailDeliveryAction::Trash)]);
+    }
+
+    #[tokio::test]
+    async fn failed_or_interrupted_trash_never_marks_local_deletion_confirmed() {
+        let db = TestDatabase::new().await;
+        db.seed_thread("thread-trash-failure").await;
+        enqueue_mail_operation(&db.pool, "thread-trash-failure", "trash").await.unwrap();
+        let item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-trash-failure'")
+            .fetch_one(&db.pool).await.unwrap();
+        settle_mail_operation_result(&db.pool, &item, Err("connection lost".to_string())).await.unwrap();
+
+        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-trash-failure'")
+            .fetch_one(&db.pool).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT status FROM mail_operations WHERE thread_id = 'thread-trash-failure'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(trashed_at, None);
+        assert_eq!(state, "pending");
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn restart_returns_in_progress_delivery_to_reconciliation_queue() {
+        let db = TestDatabase::new().await;
+        db.seed_thread("thread-restart-trash").await;
+        enqueue_mail_operation(&db.pool, "thread-restart-trash", "trash").await.unwrap();
+        sqlx::query("UPDATE mail_operations SET status = 'in_progress' WHERE thread_id = 'thread-restart-trash'")
+            .execute(&db.pool).await.unwrap();
+
+        recover_interrupted_mail_operations(&db.pool, "2026-10-04T00:00:00+00:00").await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT status FROM mail_operations WHERE thread_id = 'thread-restart-trash'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(state, "pending");
         db.close().await;
     }
 
@@ -2022,7 +2229,7 @@ mod tests {
         enqueue_mail_operation(&db.pool, "thread-retry", "archive").await.unwrap();
 
         for attempt in 1..=3 {
-            let item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count FROM mail_operations WHERE thread_id = 'thread-retry'").fetch_one(&db.pool).await.unwrap();
+            let item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-retry'").fetch_one(&db.pool).await.unwrap();
             let failure = settle_mail_operation_result(&db.pool, &item, Err("offline".to_string())).await.unwrap();
             let state: (String, i64) = sqlx::query_as("SELECT status, attempt_count FROM mail_operations WHERE thread_id = 'thread-retry'").fetch_one(&db.pool).await.unwrap();
             if attempt < 3 {
@@ -2039,8 +2246,8 @@ mod tests {
     #[tokio::test]
     async fn queued_archive_dispatches_to_fake_delivery_without_imap() {
         let delivery = FakeMailDelivery::default();
-        let item = MailOperation { id: "operation-1".to_string(), thread_id: "thread-remote".to_string(), operation: "archive".to_string(), attempt_count: 0 };
+        let item = MailOperation { id: "operation-1".to_string(), thread_id: "thread-remote".to_string(), operation: "archive".to_string(), attempt_count: 0, remote_attempted_at: None };
         dispatch_mail_delivery(&delivery, &item).await.unwrap();
-        assert_eq!(*delivery.0.lock().unwrap(), vec![("thread-remote".to_string(), MailDeliveryAction::Archive)]);
+        assert_eq!(*delivery.deliveries.lock().unwrap(), vec![("thread-remote".to_string(), MailDeliveryAction::Archive)]);
     }
 }

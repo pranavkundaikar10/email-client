@@ -250,6 +250,9 @@ export const api = {
   recategorizeThreads: () =>
     invoke<void>("recategorize_threads"),
 
+  addThreadSenderToSplitRule: (accountId: string, threadId: string, splitId: string) =>
+    invoke<string>("add_thread_sender_to_split_rule", { accountId, threadId, splitId }),
+
   // Agent — local-LLM email triage. `model`/`baseUrl` are optional overrides
   // for the Ollama model name / server URL (defaults live on the Rust side).
   analyzeThread: (threadId: string, model?: string, baseUrl?: string, analysisMode?: "manual" | "background") =>

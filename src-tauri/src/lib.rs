@@ -40,7 +40,8 @@ pub fn run() {
                 }
                 app_handle.manage(pool.clone());
                 tauri::async_runtime::spawn(async move {
-                    let _ = sync::process_mail_operations(&app_handle, &pool, &worker_for_startup).await;
+                    let _ = sync::process_mail_operations(&app_handle, &pool, &worker_for_startup)
+                        .await;
                 });
             });
             app.manage(operation_worker);
@@ -82,6 +83,7 @@ pub fn run() {
             splits::delete_split,
             splits::reorder_splits,
             splits::recategorize_threads,
+            splits::add_thread_sender_to_split_rule,
             compose::send_email,
             agent::analyze_thread,
             agent::analyze_inbox,

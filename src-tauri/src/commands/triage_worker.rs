@@ -113,7 +113,10 @@ pub async fn claim_next_triage_job(
     .map_err(|error| error.to_string())?;
 
     let Some(job) = candidate else {
-        transaction.commit().await.map_err(|error| error.to_string())?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
         return Ok(None);
     };
 
@@ -129,9 +132,16 @@ pub async fn claim_next_triage_job(
     .execute(&mut *transaction)
     .await
     .map_err(|error| error.to_string())?;
-    transaction.commit().await.map_err(|error| error.to_string())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
 
-    if claimed.rows_affected() == 1 { Ok(Some(job)) } else { Ok(None) }
+    if claimed.rows_affected() == 1 {
+        Ok(Some(job))
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn complete_triage_job(pool: &SqlitePool, job: &TriageJob) -> Result<(), String> {
@@ -268,7 +278,10 @@ pub async fn run_one_background_triage(
         )
         .await?;
     }
-    let executor = LiveTriageExecutor { app: app.clone(), pool: pool.clone() };
+    let executor = LiveTriageExecutor {
+        app: app.clone(),
+        pool: pool.clone(),
+    };
     process_one_triage_job(pool, &executor, now).await
 }
 
@@ -316,8 +329,8 @@ pub async fn process_background_triage(
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_next_triage_job, complete_triage_job, enqueue_triage_job,
-        process_one_triage_job, retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
+        claim_next_triage_job, complete_triage_job, enqueue_triage_job, process_one_triage_job,
+        retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
     };
     use crate::commands::test_support::TestDatabase;
     use chrono::{Duration, Utc};
@@ -340,21 +353,54 @@ mod tests {
         }
     }
 
-    async fn seed_job(database: &TestDatabase, thread_id: &str, message_id: &str, received_at: chrono::DateTime<Utc>) {
+    async fn seed_job(
+        database: &TestDatabase,
+        thread_id: &str,
+        message_id: &str,
+        received_at: chrono::DateTime<Utc>,
+    ) {
         database.seed_thread(thread_id).await;
-        database.seed_message_for_thread(message_id, thread_id, &received_at.to_rfc3339()).await;
-        enqueue_triage_job(&database.pool, thread_id, message_id, received_at, received_at).await.unwrap();
+        database
+            .seed_message_for_thread(message_id, thread_id, &received_at.to_rfc3339())
+            .await;
+        enqueue_triage_job(
+            &database.pool,
+            thread_id,
+            message_id,
+            received_at,
+            received_at,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn claims_one_newest_job_and_never_claims_it_twice() {
         let database = TestDatabase::new().await;
         let now = Utc::now();
-        seed_job(&database, "thread-older", "message-older", now - Duration::minutes(2)).await;
-        seed_job(&database, "thread-newer", "message-newer", now - Duration::minutes(1)).await;
+        seed_job(
+            &database,
+            "thread-older",
+            "message-older",
+            now - Duration::minutes(2),
+        )
+        .await;
+        seed_job(
+            &database,
+            "thread-newer",
+            "message-newer",
+            now - Duration::minutes(1),
+        )
+        .await;
 
-        let first = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
-        let second = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
+        let first = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
         let none_left = claim_next_triage_job(&database.pool, now).await.unwrap();
 
         assert_eq!(first.thread_id, "thread-newer");
@@ -368,11 +414,16 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-complete", "message-complete", now).await;
-        let job = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
+        let job = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
 
         complete_triage_job(&database.pool, &job).await.unwrap();
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM background_triage_jobs")
-            .fetch_one(&database.pool).await.unwrap();
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
         assert_eq!(remaining, 0);
         database.close().await;
     }
@@ -382,17 +433,34 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-first", "message-first", now).await;
-        seed_job(&database, "thread-second", "message-second", now - Duration::seconds(1)).await;
-        let first = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
+        seed_job(
+            &database,
+            "thread-second",
+            "message-second",
+            now - Duration::seconds(1),
+        )
+        .await;
+        let first = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
 
-        retry_triage_job(&database.pool, &first, "Ollama unavailable", now).await.unwrap();
-        let second = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
+        retry_triage_job(&database.pool, &first, "Ollama unavailable", now)
+            .await
+            .unwrap();
+        let second = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(second.thread_id, "thread-second");
         let retry: (String, i64, String) = sqlx::query_as(
             "SELECT status, attempt_count, last_error FROM background_triage_jobs WHERE thread_id = 'thread-first'",
         ).fetch_one(&database.pool).await.unwrap();
-        assert_eq!(retry, ("pending".to_string(), 1, "Ollama unavailable".to_string()));
+        assert_eq!(
+            retry,
+            ("pending".to_string(), 1, "Ollama unavailable".to_string())
+        );
         database.close().await;
     }
 
@@ -401,9 +469,15 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-recover", "message-recover", now).await;
-        let first = claim_next_triage_job(&database.pool, now).await.unwrap().unwrap();
+        let first = claim_next_triage_job(&database.pool, now)
+            .await
+            .unwrap()
+            .unwrap();
 
-        let recovered = claim_next_triage_job(&database.pool, now + Duration::minutes(11)).await.unwrap().unwrap();
+        let recovered = claim_next_triage_job(&database.pool, now + Duration::minutes(11))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(recovered, first);
         database.close().await;
     }
@@ -413,14 +487,21 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-run", "message-run", now).await;
-        let executor = FakeExecutor { result: Ok(()), processed: Mutex::new(Vec::new()) };
+        let executor = FakeExecutor {
+            result: Ok(()),
+            processed: Mutex::new(Vec::new()),
+        };
 
-        let result = process_one_triage_job(&database.pool, &executor, now).await.unwrap();
+        let result = process_one_triage_job(&database.pool, &executor, now)
+            .await
+            .unwrap();
 
         assert_eq!(result, ProcessOneResult::Completed);
         assert_eq!(*executor.processed.lock().unwrap(), ["thread-run"]);
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM background_triage_jobs")
-            .fetch_one(&database.pool).await.unwrap();
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
         assert_eq!(remaining, 0);
         database.close().await;
     }
@@ -430,12 +511,34 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-fails", "message-fails", now).await;
-        seed_job(&database, "thread-later", "message-later", now - Duration::seconds(1)).await;
-        let failing = FakeExecutor { result: Err("model offline".to_string()), processed: Mutex::new(Vec::new()) };
-        let succeeding = FakeExecutor { result: Ok(()), processed: Mutex::new(Vec::new()) };
+        seed_job(
+            &database,
+            "thread-later",
+            "message-later",
+            now - Duration::seconds(1),
+        )
+        .await;
+        let failing = FakeExecutor {
+            result: Err("model offline".to_string()),
+            processed: Mutex::new(Vec::new()),
+        };
+        let succeeding = FakeExecutor {
+            result: Ok(()),
+            processed: Mutex::new(Vec::new()),
+        };
 
-        assert_eq!(process_one_triage_job(&database.pool, &failing, now).await.unwrap(), ProcessOneResult::Retrying);
-        assert_eq!(process_one_triage_job(&database.pool, &succeeding, now).await.unwrap(), ProcessOneResult::Completed);
+        assert_eq!(
+            process_one_triage_job(&database.pool, &failing, now)
+                .await
+                .unwrap(),
+            ProcessOneResult::Retrying
+        );
+        assert_eq!(
+            process_one_triage_job(&database.pool, &succeeding, now)
+                .await
+                .unwrap(),
+            ProcessOneResult::Completed
+        );
         assert_eq!(*failing.processed.lock().unwrap(), ["thread-fails"]);
         assert_eq!(*succeeding.processed.lock().unwrap(), ["thread-later"]);
         database.close().await;
@@ -446,10 +549,19 @@ mod tests {
         let database = TestDatabase::new().await;
         let now = Utc::now();
         seed_job(&database, "thread-terminal", "message-terminal", now).await;
-        let executor = FakeExecutor { result: Err("invalid response".to_string()), processed: Mutex::new(Vec::new()) };
+        let executor = FakeExecutor {
+            result: Err("invalid response".to_string()),
+            processed: Mutex::new(Vec::new()),
+        };
 
         for attempt in 0..3 {
-            let result = process_one_triage_job(&database.pool, &executor, now + Duration::minutes(20 * attempt)).await.unwrap();
+            let result = process_one_triage_job(
+                &database.pool,
+                &executor,
+                now + Duration::minutes(20 * attempt),
+            )
+            .await
+            .unwrap();
             assert_eq!(result, ProcessOneResult::Retrying);
         }
 
@@ -457,7 +569,12 @@ mod tests {
             "SELECT status, attempt_count FROM background_triage_jobs WHERE thread_id = 'thread-terminal'",
         ).fetch_one(&database.pool).await.unwrap();
         assert_eq!(state, ("failed".to_string(), 3));
-        assert_eq!(claim_next_triage_job(&database.pool, now + Duration::hours(2)).await.unwrap(), None);
+        assert_eq!(
+            claim_next_triage_job(&database.pool, now + Duration::hours(2))
+                .await
+                .unwrap(),
+            None
+        );
         database.close().await;
     }
 }

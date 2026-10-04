@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const LEGACY_APP_IDENTIFIER: &str = "com.pranavkundaikar.tmpemail-client-scaffold";
@@ -14,10 +14,7 @@ const LEGACY_APP_IDENTIFIER: &str = "com.pranavkundaikar.tmpemail-client-scaffol
 /// like a clean installation. This is deliberately copy-only: the original
 /// directory remains an intact fallback if anything goes wrong.
 pub fn migrate_legacy_app_data(app: &AppHandle) -> Result<(), String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let parent = data_dir
         .parent()
         .ok_or_else(|| "Could not determine the application data directory".to_string())?;
@@ -32,7 +29,10 @@ pub fn migrate_legacy_app_data(app: &AppHandle) -> Result<(), String> {
     // Only fill missing files. This makes the migration safe for people who
     // already set up the renamed app, and lets a partially interrupted copy
     // finish on the next launch without overwriting newer data.
-    copy_if_missing(&legacy_dir.join("credentials.json"), &data_dir.join("credentials.json"))?;
+    copy_if_missing(
+        &legacy_dir.join("credentials.json"),
+        &data_dir.join("credentials.json"),
+    )?;
 
     let legacy_db = legacy_dir.join("mail.db");
     let target_db = data_dir.join("mail.db");
@@ -40,8 +40,14 @@ pub fn migrate_legacy_app_data(app: &AppHandle) -> Result<(), String> {
         copy_file_atomically(&legacy_db, &target_db)?;
         // SQLite may have recent writes in WAL mode. Copy its companion files
         // before opening the migrated database so SQLite can recover them.
-        copy_if_missing(&legacy_dir.join("mail.db-wal"), &data_dir.join("mail.db-wal"))?;
-        copy_if_missing(&legacy_dir.join("mail.db-shm"), &data_dir.join("mail.db-shm"))?;
+        copy_if_missing(
+            &legacy_dir.join("mail.db-wal"),
+            &data_dir.join("mail.db-wal"),
+        )?;
+        copy_if_missing(
+            &legacy_dir.join("mail.db-shm"),
+            &data_dir.join("mail.db-shm"),
+        )?;
     }
 
     Ok(())
@@ -69,10 +75,7 @@ fn copy_file_atomically(source: &Path, destination: &Path) -> Result<(), String>
 }
 
 pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
@@ -85,6 +88,7 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // Keep the production migration set embedded in the desktop binary.
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -134,15 +138,25 @@ pub async fn normalize_account_ids(app: &AppHandle, pool: &SqlitePool) -> Result
         .await
         .map_err(|e| e.to_string())?;
     let migration_result = async {
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| e.to_string())?;
         for (old_id, new_id) in &migrations {
-            for table in ["threads", "messages", "mail_operations", "mail_flag_operations"] {
-                sqlx::query(&format!("UPDATE {table} SET account_id = ? WHERE account_id = ?"))
-                    .bind(new_id)
-                    .bind(old_id)
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            for table in [
+                "threads",
+                "messages",
+                "mail_operations",
+                "mail_flag_operations",
+            ] {
+                sqlx::query(&format!(
+                    "UPDATE {table} SET account_id = ? WHERE account_id = ?"
+                ))
+                .bind(new_id)
+                .bind(old_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(|e| e.to_string())?;
             }
             sqlx::query("UPDATE accounts SET id = ? WHERE id = ?")
                 .bind(new_id)
@@ -151,13 +165,19 @@ pub async fn normalize_account_ids(app: &AppHandle, pool: &SqlitePool) -> Result
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        sqlx::query("COMMIT").execute(&mut *connection).await.map_err(|e| e.to_string())?;
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok::<(), String>(())
-    }.await;
+    }
+    .await;
     if migration_result.is_err() {
         let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
     }
-    let restore_result = sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *connection).await;
+    let restore_result = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await;
     migration_result?;
     restore_result.map_err(|e| e.to_string())?;
     Ok(())
@@ -193,10 +213,13 @@ pub async fn merge_legacy_app_data(app: &AppHandle, pool: &SqlitePool) -> Result
             .map_err(|e| format!("Could not back up current mail data before migration: {e}"))?;
     }
 
-    sqlx::query(&format!("ATTACH DATABASE '{}' AS legacy", quote_sql_path(&legacy_db)))
-        .execute(&mut *connection)
-        .await
-        .map_err(|e| format!("Could not open legacy mail data: {e}"))?;
+    sqlx::query(&format!(
+        "ATTACH DATABASE '{}' AS legacy",
+        quote_sql_path(&legacy_db)
+    ))
+    .execute(&mut *connection)
+    .await
+    .map_err(|e| format!("Could not open legacy mail data: {e}"))?;
 
     let merge_result = async {
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(|e| e.to_string())?;
@@ -225,7 +248,9 @@ pub async fn merge_legacy_app_data(app: &AppHandle, pool: &SqlitePool) -> Result
         let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
     }
     merge_result?;
-    let detach_result = sqlx::query("DETACH DATABASE legacy").execute(&mut *connection).await;
+    let detach_result = sqlx::query("DETACH DATABASE legacy")
+        .execute(&mut *connection)
+        .await;
 
     // The import itself has committed at this point. A best-effort DETACH can
     // occasionally fail while SQLite still holds an internal statement; the
@@ -293,9 +318,15 @@ pub struct AttachmentRow {
 }
 
 async fn enrich_correspondents(pool: &SqlitePool, rows: &mut [ThreadRow]) {
-    if rows.is_empty() { return; }
-    let placeholders = std::iter::repeat("?").take(rows.len()).collect::<Vec<_>>().join(",");
-    let sql = format!(r#"
+    if rows.is_empty() {
+        return;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(rows.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
         SELECT m.thread_id, m.from_name, m.from_email
         FROM messages m JOIN threads t ON t.id = m.thread_id
         JOIN accounts a ON a.id = t.account_id
@@ -306,14 +337,23 @@ async fn enrich_correspondents(pool: &SqlitePool, rows: &mut [ThreadRow]) {
               WHERE m2.thread_id = m.thread_id
                 AND LOWER(m2.from_email) != LOWER(a.email)
           )
-    "#);
+    "#
+    );
     let mut query = sqlx::query_as::<_, (String, String, String)>(&sql);
-    for row in rows.iter() { query = query.bind(&row.id); }
+    for row in rows.iter() {
+        query = query.bind(&row.id);
+    }
     let matches = match query.fetch_all(pool).await {
         Ok(matches) => matches,
-        Err(error) => { eprintln!("Could not enrich thread correspondents: {error}"); return; }
+        Err(error) => {
+            eprintln!("Could not enrich thread correspondents: {error}");
+            return;
+        }
     };
-    let correspondents: HashMap<_, _> = matches.into_iter().map(|(id, name, email)| (id, (name, email))).collect();
+    let correspondents: HashMap<_, _> = matches
+        .into_iter()
+        .map(|(id, name, email)| (id, (name, email)))
+        .collect();
     for row in rows {
         if let Some((name, email)) = correspondents.get(&row.id) {
             row.from_name = name.clone();
@@ -338,7 +378,8 @@ pub async fn get_threads(
         category.as_deref(),
         limit,
         offset,
-    ).await
+    )
+    .await
 }
 
 /// The account-scoped thread-list query shared by the Tauri command and
@@ -359,15 +400,17 @@ async fn list_threads_for_account(
     }
 
     let where_clause = match view {
-        Some("sent")    => "t.folder = 'sent'".to_string(),
-        Some("drafts")  => "t.folder = 'drafts'".to_string(),
+        Some("sent") => "t.folder = 'sent'".to_string(),
+        Some("drafts") => "t.folder = 'drafts'".to_string(),
         // Gmail's Starred label is independent of Inbox: archived (and sent)
         // threads remain starred until the user explicitly removes the star.
         Some("starred") => "t.starred = 1".to_string(),
         Some("archive") => "t.folder = 'inbox' AND t.archived = 1".to_string(),
-        _               => {
+        _ => {
             let cat = match category {
-                Some(c) if !c.is_empty() => format!(" AND t.category = '{}'", c.replace('\'', "''")),
+                Some(c) if !c.is_empty() => {
+                    format!(" AND t.category = '{}'", c.replace('\'', "''"))
+                }
                 _ => String::new(),
             };
             format!("t.folder = 'inbox' AND t.archived = 0{}", cat)
@@ -378,21 +421,25 @@ async fn list_threads_for_account(
     // trash operation, however, is hidden everywhere just like a deleted
     // message in Gmail.
     let pending_operation_clause = match view {
-        Some("starred") => r#"
+        Some("starred") => {
+            r#"
           AND NOT EXISTS (
               SELECT 1 FROM mail_operations o
               WHERE o.thread_id = t.id
                 AND o.operation = 'trash'
                 AND o.status IN ('pending', 'in_progress')
           )
-        "#,
-        _ => r#"
+        "#
+        }
+        _ => {
+            r#"
           AND NOT EXISTS (
               SELECT 1 FROM mail_operations o
               WHERE o.thread_id = t.id
                 AND o.status IN ('pending', 'in_progress')
           )
-        "#,
+        "#
+        }
     };
 
     let mut rows = sqlx::query_as::<_, ThreadRow>(&format!(
@@ -415,8 +462,7 @@ async fn list_threads_for_account(
         ORDER BY t.last_message_at DESC
         LIMIT ? OFFSET ?
         "#,
-        where_clause,
-        pending_operation_clause,
+        where_clause, pending_operation_clause,
     ))
     .bind(account_id)
     .bind(limit)
@@ -478,7 +524,6 @@ pub async fn get_message_attachments(
     .await
     .map_err(|e| e.to_string())
 }
-
 
 #[tauri::command]
 pub async fn get_unread_counts(
@@ -553,28 +598,36 @@ mod tests {
         let database = TestDatabase::new().await;
         database.seed_account("account-a", "a@example.com").await;
         database.seed_account("account-b", "b@example.com").await;
-        database.seed_thread_for_account("thread-a", "account-a").await;
-        database.seed_thread_for_account("thread-b", "account-b").await;
+        database
+            .seed_thread_for_account("thread-a", "account-a")
+            .await;
+        database
+            .seed_thread_for_account("thread-b", "account-b")
+            .await;
 
-        let account_a_threads = list_threads_for_account(
-            &database.pool,
-            "account-a",
-            None,
-            None,
-            Some(50),
-            Some(0),
-        ).await.expect("list account A threads");
-        let account_b_threads = list_threads_for_account(
-            &database.pool,
-            "account-b",
-            None,
-            None,
-            Some(50),
-            Some(0),
-        ).await.expect("list account B threads");
+        let account_a_threads =
+            list_threads_for_account(&database.pool, "account-a", None, None, Some(50), Some(0))
+                .await
+                .expect("list account A threads");
+        let account_b_threads =
+            list_threads_for_account(&database.pool, "account-b", None, None, Some(50), Some(0))
+                .await
+                .expect("list account B threads");
 
-        assert_eq!(account_a_threads.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(), ["thread-a"]);
-        assert_eq!(account_b_threads.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(), ["thread-b"]);
+        assert_eq!(
+            account_a_threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-a"]
+        );
+        assert_eq!(
+            account_b_threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["thread-b"]
+        );
         database.close().await;
     }
 }

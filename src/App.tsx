@@ -445,6 +445,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
           onClose={() => setCommandPaletteOpen(false)}
           splits={splitDefs}
           onSplitChange={switchTab}
+          activeSplitId={showTabs ? effectiveSplitId : null}
           onSplitsSettings={() => setSplitsOpen(true)}
           onToggleFullscreen={() => { void toggleSimpleFullscreen(); }}
           isSimpleFullscreen={simpleFullscreen}

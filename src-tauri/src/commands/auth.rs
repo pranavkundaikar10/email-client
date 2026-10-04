@@ -202,7 +202,9 @@ pub async fn get_gmail_auth(app: &AppHandle, email: &str) -> Result<GmailAuth, S
 
     match account.auth_kind {
         AuthKind::AppPassword => Ok(GmailAuth::AppPassword(account.password)),
-        AuthKind::GoogleOAuth => Ok(GmailAuth::OAuthAccessToken(access_token_for(&account.email).await?)),
+        AuthKind::GoogleOAuth => Ok(GmailAuth::OAuthAccessToken(
+            access_token_for(&account.email).await?,
+        )),
     }
 }
 

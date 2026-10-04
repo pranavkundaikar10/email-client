@@ -84,7 +84,10 @@ impl Default for AiAssistanceSettings {
 
 impl Default for ThinkingSettings {
     fn default() -> Self {
-        Self { manual: true, background: false }
+        Self {
+            manual: true,
+            background: false,
+        }
     }
 }
 
@@ -188,9 +191,15 @@ struct CalendarEventDraft {
     description: String,
 }
 
-fn default_importance() -> i64 { 3 }
-fn default_category() -> String { "other".to_string() }
-fn default_recommended_action() -> String { "review".to_string() }
+fn default_importance() -> i64 {
+    3
+}
+fn default_category() -> String {
+    "other".to_string()
+}
+fn default_recommended_action() -> String {
+    "review".to_string()
+}
 
 #[derive(Serialize)]
 struct OllamaRequest<'a> {
@@ -255,12 +264,11 @@ async fn configured_triage_preferences(pool: &SqlitePool) -> Result<String, Stri
 }
 
 async fn configured_thinking_settings(pool: &SqlitePool) -> Result<ThinkingSettings, String> {
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM app_settings WHERE key = 'ai_thinking_settings'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'ai_thinking_settings'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(stored
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -268,12 +276,11 @@ async fn configured_thinking_settings(pool: &SqlitePool) -> Result<ThinkingSetti
 }
 
 async fn configured_ai_assistance(pool: &SqlitePool) -> Result<AiAssistanceSettings, String> {
-    let stored: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM app_settings WHERE key = 'ai_assistance_settings'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'ai_assistance_settings'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(stored
         .and_then(|value| serde_json::from_str(&value).ok())
@@ -338,42 +345,71 @@ fn normalized_job_category(is_job_related: bool, category: &str) -> Option<Strin
     }
     let category = category.trim().to_ascii_lowercase();
     match category.as_str() {
-        "confirmation" | "rejection" | "assessment" | "screening" | "interview" | "offer" | "other" => Some(category),
+        "confirmation" | "rejection" | "assessment" | "screening" | "interview" | "offer"
+        | "other" => Some(category),
         _ => Some("other".to_string()),
     }
 }
 
 fn normalized_recommended_action(action: &str) -> String {
     match action.trim().to_ascii_lowercase().as_str() {
-        "keep" | "follow_up" | "archive" | "delete" | "review" => action.trim().to_ascii_lowercase(),
+        "keep" | "follow_up" | "archive" | "delete" | "review" => {
+            action.trim().to_ascii_lowercase()
+        }
         _ => "review".to_string(),
     }
 }
 
 fn source_contains(body: &str, value: &str) -> bool {
-    let normalize = |value: &str| value.to_ascii_lowercase().chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .collect::<String>();
+    let normalize = |value: &str| {
+        value
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>()
+    };
     let value = normalize(value);
     !value.is_empty() && normalize(body).contains(&value)
 }
 
-fn resolved_calendar_event(event: Option<RawCalendarEvent>, received_at: &str, body: &str) -> Option<CalendarEventDraft> {
+fn resolved_calendar_event(
+    event: Option<RawCalendarEvent>,
+    received_at: &str,
+    body: &str,
+) -> Option<CalendarEventDraft> {
     let event = event?;
-    if event.title.trim().is_empty() { return None; }
-    if event.date_clues.iter().any(|clue| !source_contains(body, clue))
-        || !source_contains(body, &event.time_text)
-        || !source_contains(body, &event.timezone_text) {
+    if event.title.trim().is_empty() {
         return None;
     }
-    let received_at = chrono::DateTime::parse_from_rfc3339(received_at).ok()?.with_timezone(&chrono::Utc);
-    let clues = event.date_clues.iter().map(String::as_str).collect::<Vec<_>>();
+    if event
+        .date_clues
+        .iter()
+        .any(|clue| !source_contains(body, clue))
+        || !source_contains(body, &event.time_text)
+        || !source_contains(body, &event.timezone_text)
+    {
+        return None;
+    }
+    let received_at = chrono::DateTime::parse_from_rfc3339(received_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let clues = event
+        .date_clues
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let resolved = crate::calendar_resolver::resolve_free_text_event(
-        received_at, &clues, Some(&event.time_text), Some(&event.timezone_text), event.duration_minutes,
-    ).ok()?;
+        received_at,
+        &clues,
+        Some(&event.time_text),
+        Some(&event.timezone_text),
+        event.duration_minutes,
+    )
+    .ok()?;
     Some(CalendarEventDraft {
         title: truncate(event.title.trim(), 160),
-        start_at: resolved.start_at, end_at: resolved.end_at,
+        start_at: resolved.start_at,
+        end_at: resolved.end_at,
         location: truncate(event.location.trim(), 500),
         description: truncate(event.description.trim(), 2_000),
     })
@@ -402,7 +438,11 @@ fn build_user_prompt(
         from_name,
         from_email,
         subject,
-        if has_attachments { "yes — content has not been read" } else { "none" },
+        if has_attachments {
+            "yes — content has not been read"
+        } else {
+            "none"
+        },
         truncate(body.trim(), MAX_BODY_CHARS)
     )
 }
@@ -418,8 +458,14 @@ async fn call_model(
     let req = OllamaRequest {
         model,
         messages: vec![
-            OllamaMessage { role: "system", content: system_instruction },
-            OllamaMessage { role: "user", content: user_prompt },
+            OllamaMessage {
+                role: "system",
+                content: system_instruction,
+            },
+            OllamaMessage {
+                role: "user",
+                content: user_prompt,
+            },
         ],
         format: "json",
         stream: false,
@@ -427,10 +473,14 @@ async fn call_model(
         // When thinking is disabled this cap applies to the final JSON response,
         // preventing a malformed or overly verbose reply from monopolizing
         // the local model.
-        options: think.map(|thinking_enabled| (!thinking_enabled).then_some(OllamaOptions {
-            num_predict: 320,
-            temperature: 0.0,
-        })).flatten(),
+        options: think
+            .map(|thinking_enabled| {
+                (!thinking_enabled).then_some(OllamaOptions {
+                    num_predict: 320,
+                    temperature: 0.0,
+                })
+            })
+            .flatten(),
     };
 
     let resp = client
@@ -451,8 +501,12 @@ async fn call_model(
         .await
         .map_err(|e| format!("unexpected Ollama response shape: {}", e))?;
 
-    serde_json::from_str::<ModelPayload>(&parsed.message.content)
-        .map_err(|e| format!("model did not return valid JSON ({}): {}", e, parsed.message.content))
+    serde_json::from_str::<ModelPayload>(&parsed.message.content).map_err(|e| {
+        format!(
+            "model did not return valid JSON ({}): {}",
+            e, parsed.message.content
+        )
+    })
 }
 
 fn should_retry_without_calendar(error: &str) -> bool {
@@ -467,7 +521,15 @@ async fn latest_message_text(
     thread_id: &str,
 ) -> Result<(String, String, String, String, bool, String), String> {
     // (from_name, from_email, subject, body, has_attachments)
-    let row: Option<(String, String, String, Option<String>, Option<String>, i64, String)> = sqlx::query_as(
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+    )> = sqlx::query_as(
         r#"
         SELECT from_name, from_email, subject, body_text, body_html, has_attachments, sent_at
         FROM messages
@@ -481,7 +543,16 @@ async fn latest_message_text(
     .await
     .map_err(|e| e.to_string())?;
 
-    let Some((from_name, from_email, subject, body_text, body_html, has_attachments_int, received_at)) = row else {
+    let Some((
+        from_name,
+        from_email,
+        subject,
+        body_text,
+        body_html,
+        has_attachments_int,
+        received_at,
+    )) = row
+    else {
         return Err(format!("no messages found for thread {}", thread_id));
     };
 
@@ -499,7 +570,14 @@ async fn latest_message_text(
         }
     };
 
-    Ok((from_name, from_email, subject, body, has_attachments_int != 0, received_at))
+    Ok((
+        from_name,
+        from_email,
+        subject,
+        body,
+        has_attachments_int != 0,
+        received_at,
+    ))
 }
 
 /// Analyze a single thread and upsert the result into `email_analysis`.
@@ -517,7 +595,8 @@ pub async fn analyze_thread(
         model,
         base_url,
         analysis_mode.as_deref(),
-    ).await
+    )
+    .await
 }
 
 /// Shared manual/background analysis implementation. Callers only choose the
@@ -557,18 +636,22 @@ pub(crate) async fn analyze_thread_with_pool(
         prompt.clone(),
         Some(think),
     )
-    .await {
+    .await
+    {
         Ok(payload) => payload,
         // A calendar candidate must never make ordinary triage unusable. One
         // compact retry removes only that optional field when output was cut
         // off before valid JSON could be returned.
-        Err(error) if should_retry_without_calendar(&error) => call_model(
-            &base_url,
-            &model,
-            system_prompt(&triage_preferences, false),
-            prompt,
-            Some(think),
-        ).await?,
+        Err(error) if should_retry_without_calendar(&error) => {
+            call_model(
+                &base_url,
+                &model,
+                system_prompt(&triage_preferences, false),
+                prompt,
+                Some(think),
+            )
+            .await?
+        }
         Err(error) => return Err(error),
     };
 
@@ -578,8 +661,14 @@ pub(crate) async fn analyze_thread_with_pool(
     if has_attachments {
         payload.is_actionable = true;
         payload.importance = payload.importance.max(3);
-        if !payload.action_items.iter().any(|item| item.contains("attachment")) {
-            payload.action_items.insert(0, "Review the attachment before archiving.".to_string());
+        if !payload
+            .action_items
+            .iter()
+            .any(|item| item.contains("attachment"))
+        {
+            payload
+                .action_items
+                .insert(0, "Review the attachment before archiving.".to_string());
         }
         payload.summary = if payload.summary.trim().is_empty() {
             "Attachment present — review before archiving.".to_string()
@@ -597,7 +686,8 @@ pub(crate) async fn analyze_thread_with_pool(
     } else {
         normalized_recommended_action(&payload.recommended_action)
     };
-    let inferred_calendar = crate::calendar_resolver::extract_common_event_hints(&body).map(|hints| RawCalendarEvent {
+    let inferred_calendar =
+        crate::calendar_resolver::extract_common_event_hints(&body).map(|hints| RawCalendarEvent {
             title: subject.clone(),
             date_clues: hints.date_clues,
             time_text: hints.time,
@@ -608,7 +698,9 @@ pub(crate) async fn analyze_thread_with_pool(
         });
     let calendar_event = resolved_calendar_event(payload.calendar_event, &received_at, &body)
         .or_else(|| resolved_calendar_event(inferred_calendar, &received_at, &body));
-    let calendar_event_json = calendar_event.as_ref().and_then(|event| serde_json::to_string(event).ok());
+    let calendar_event_json = calendar_event
+        .as_ref()
+        .and_then(|event| serde_json::to_string(event).ok());
     let now = chrono::Utc::now().to_rfc3339();
 
     sqlx::query(
@@ -694,10 +786,7 @@ pub async fn get_ai_model(pool: tauri::State<'_, SqlitePool>) -> Result<String, 
 }
 
 #[tauri::command]
-pub async fn set_ai_model(
-    pool: tauri::State<'_, SqlitePool>,
-    model: String,
-) -> Result<(), String> {
+pub async fn set_ai_model(pool: tauri::State<'_, SqlitePool>, model: String) -> Result<(), String> {
     let model = model.trim();
     if model.is_empty() {
         return Err("model name cannot be empty".to_string());
@@ -751,7 +840,9 @@ pub async fn set_triage_preferences(
 ) -> Result<(), String> {
     let preferences = preferences.trim();
     if preferences.chars().count() > MAX_TRIAGE_PREFERENCES_CHARS {
-        return Err(format!("Triage preferences must be at most {MAX_TRIAGE_PREFERENCES_CHARS} characters"));
+        return Err(format!(
+            "Triage preferences must be at most {MAX_TRIAGE_PREFERENCES_CHARS} characters"
+        ));
     }
     sqlx::query(
         "INSERT INTO app_settings (key, value) VALUES ('triage_preferences', ?) \
@@ -824,7 +915,15 @@ pub async fn analyze_inbox(
 
     let mut results = Vec::new();
     for thread_id in stale_thread_ids {
-        match analyze_thread(pool.clone(), thread_id.clone(), model.clone(), base_url.clone(), analysis_mode.clone()).await {
+        match analyze_thread(
+            pool.clone(),
+            thread_id.clone(),
+            model.clone(),
+            base_url.clone(),
+            analysis_mode.clone(),
+        )
+        .await
+        {
             Ok(row) => results.push(row),
             Err(e) => {
                 // Don't let one unparseable/unreachable email kill the batch.
@@ -859,7 +958,8 @@ pub(crate) async fn background_analysis_candidates(
         return Ok(Vec::new());
     }
     let limit = limit.clamp(1, 5);
-    let today_start = now.with_timezone(&chrono::Local)
+    let today_start = now
+        .with_timezone(&chrono::Local)
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
@@ -923,7 +1023,10 @@ pub(crate) async fn backlog_analysis_candidates(
     .map_err(|e| e.to_string())
 }
 
-async fn oldest_cached_inbox_timestamp(pool: &SqlitePool, account_id: &str) -> Result<Option<String>, String> {
+async fn oldest_cached_inbox_timestamp(
+    pool: &SqlitePool,
+    account_id: &str,
+) -> Result<Option<String>, String> {
     sqlx::query_scalar(
         "SELECT MIN(last_message_at) FROM threads WHERE account_id = ? AND folder = 'inbox'",
     )
@@ -977,11 +1080,19 @@ pub async fn enqueue_backlog_triage(
     const MAX_DISCOVERY_PAGES: usize = 5;
     let mut headers_discovered = 0;
     for _ in 0..MAX_DISCOVERY_PAGES {
-        if backlog_analysis_candidates(pool.inner(), &account_id, BATCH_SIZE).await?.len() >= BATCH_SIZE as usize {
+        if backlog_analysis_candidates(pool.inner(), &account_id, BATCH_SIZE)
+            .await?
+            .len()
+            >= BATCH_SIZE as usize
+        {
             break;
         }
-        let Some(before_date) = oldest_cached_inbox_timestamp(pool.inner(), &account_id).await? else {
-            return Err("No local inbox headers yet. Wait for the initial inbox sync, then try again.".to_string());
+        let Some(before_date) = oldest_cached_inbox_timestamp(pool.inner(), &account_id).await?
+        else {
+            return Err(
+                "No local inbox headers yet. Wait for the initial inbox sync, then try again."
+                    .to_string(),
+            );
         };
         let fetched = crate::commands::sync::sync_older_for_account(
             &app,
@@ -996,7 +1107,9 @@ pub async fn enqueue_backlog_triage(
         }
     }
 
-    let queued = enqueue_backlog_triage_candidates(pool.inner(), &account_id, BATCH_SIZE, Utc::now()).await?;
+    let queued =
+        enqueue_backlog_triage_candidates(pool.inner(), &account_id, BATCH_SIZE, Utc::now())
+            .await?;
     if queued > 0 {
         crate::commands::triage_worker::start_background_triage(
             app,
@@ -1004,7 +1117,10 @@ pub async fn enqueue_backlog_triage(
             worker.inner().clone(),
         );
     }
-    Ok(BacklogTriageResult { queued, headers_discovered })
+    Ok(BacklogTriageResult {
+        queued,
+        headers_discovered,
+    })
 }
 
 pub(crate) async fn background_triage_enabled(pool: &SqlitePool) -> Result<bool, String> {
@@ -1021,11 +1137,15 @@ pub async fn get_auto_analysis_pending_count(
     background_analysis_pending_count(pool.inner(), Utc::now()).await
 }
 
-async fn background_analysis_pending_count(pool: &SqlitePool, now: DateTime<Utc>) -> Result<i64, String> {
+async fn background_analysis_pending_count(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+) -> Result<i64, String> {
     if !configured_ai_assistance(pool).await?.enabled {
         return Ok(0);
     }
-    let today_start = now.with_timezone(&chrono::Local)
+    let today_start = now
+        .with_timezone(&chrono::Local)
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
@@ -1135,7 +1255,11 @@ pub async fn record_review_decision(
     save_review_decision(pool.inner(), &thread_id, &decision).await
 }
 
-async fn save_review_decision(pool: &SqlitePool, thread_id: &str, decision: &str) -> Result<(), String> {
+async fn save_review_decision(
+    pool: &SqlitePool,
+    thread_id: &str,
+    decision: &str,
+) -> Result<(), String> {
     if !matches!(decision, "keep" | "follow_up" | "archived") {
         return Err("invalid review decision".to_string());
     }
@@ -1296,8 +1420,8 @@ mod action_contract_tests {
     use super::{
         background_analysis_candidates, background_analysis_pending_count,
         backlog_analysis_candidates, complete_follow_up_for_thread,
-        enqueue_backlog_triage_candidates, save_review_decision,
-        review_queue_for_pool, should_retry_without_calendar, system_prompt,
+        enqueue_backlog_triage_candidates, review_queue_for_pool, save_review_decision,
+        should_retry_without_calendar, system_prompt,
     };
     use crate::commands::test_support::TestDatabase;
     use chrono::{Duration, Utc};
@@ -1308,11 +1432,24 @@ mod action_contract_tests {
         db.seed_thread("thread-local").await;
         db.seed_active_follow_up("thread-local").await;
 
-        save_review_decision(&db.pool, "thread-local", "keep").await.unwrap();
-        complete_follow_up_for_thread(&db.pool, "thread-local").await.unwrap();
+        save_review_decision(&db.pool, "thread-local", "keep")
+            .await
+            .unwrap();
+        complete_follow_up_for_thread(&db.pool, "thread-local")
+            .await
+            .unwrap();
 
-        let decision: String = sqlx::query_scalar("SELECT decision FROM email_reviews WHERE thread_id = 'thread-local'").fetch_one(&db.pool).await.unwrap();
-        let status: String = sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-local'").fetch_one(&db.pool).await.unwrap();
+        let decision: String = sqlx::query_scalar(
+            "SELECT decision FROM email_reviews WHERE thread_id = 'thread-local'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-local'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         let remote_operations: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-local') + (SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-local')").fetch_one(&db.pool).await.unwrap();
         assert_eq!(decision, "keep");
         assert_eq!(status, "completed");
@@ -1344,16 +1481,19 @@ mod action_contract_tests {
                 .execute(&db.pool)
                 .await
                 .unwrap();
-            db.seed_message_for_thread(message_id, thread_id, timestamp).await;
+            db.seed_message_for_thread(message_id, thread_id, timestamp)
+                .await;
         }
 
         // A current analysis is not eligible; a durable remote operation is
         // also excluded so the worker cannot analyze an item being removed.
-        sqlx::query("INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('thread-analyzed', ?)")
-            .bind(now.to_rfc3339())
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('thread-analyzed', ?)",
+        )
+        .bind(now.to_rfc3339())
+        .execute(&db.pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO mail_operations (id, account_id, thread_id, operation, status, next_retry_at, created_at, updated_at) VALUES ('operation-queued', 'account-1', 'thread-queued', 'archive', 'pending', ?, ?, ?)")
             .bind(now.to_rfc3339())
             .bind(now.to_rfc3339())
@@ -1362,11 +1502,18 @@ mod action_contract_tests {
             .await
             .unwrap();
 
-        let candidates = background_analysis_candidates(&db.pool, 2, now).await.unwrap();
-        let pending_count = background_analysis_pending_count(&db.pool, now).await.unwrap();
+        let candidates = background_analysis_candidates(&db.pool, 2, now)
+            .await
+            .unwrap();
+        let pending_count = background_analysis_pending_count(&db.pool, now)
+            .await
+            .unwrap();
 
         assert_eq!(
-            candidates.iter().map(|candidate| candidate.thread_id.as_str()).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|candidate| candidate.thread_id.as_str())
+                .collect::<Vec<_>>(),
             ["thread-newest", "thread-next"],
         );
         assert_eq!(pending_count, 2);
@@ -1384,14 +1531,23 @@ mod action_contract_tests {
             .execute(&db.pool)
             .await
             .unwrap();
-        db.seed_message_for_thread("message-disabled", "thread-disabled", &timestamp).await;
+        db.seed_message_for_thread("message-disabled", "thread-disabled", &timestamp)
+            .await;
         sqlx::query("INSERT INTO app_settings (key, value) VALUES ('ai_assistance_settings', '{\"enabled\":false}')")
             .execute(&db.pool)
             .await
             .unwrap();
 
-        assert!(background_analysis_candidates(&db.pool, 1, now).await.unwrap().is_empty());
-        assert_eq!(background_analysis_pending_count(&db.pool, now).await.unwrap(), 0);
+        assert!(background_analysis_candidates(&db.pool, 1, now)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            background_analysis_pending_count(&db.pool, now)
+                .await
+                .unwrap(),
+            0
+        );
         db.close().await;
     }
 
@@ -1405,42 +1561,75 @@ mod action_contract_tests {
             let timestamp = (now - Duration::minutes(index)).to_rfc3339();
             db.seed_thread(&thread).await;
             sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
-                .bind(&timestamp).bind(&thread).execute(&db.pool).await.unwrap();
-            db.seed_message_for_thread(&message, &thread, &timestamp).await;
+                .bind(&timestamp)
+                .bind(&thread)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            db.seed_message_for_thread(&message, &thread, &timestamp)
+                .await;
         }
         db.seed_account("account-2", "other@example.com").await;
-        db.seed_thread_for_account("other-account-newest", "account-2").await;
-        db.seed_message_for_thread("other-account-message", "other-account-newest", &now.to_rfc3339()).await;
+        db.seed_thread_for_account("other-account-newest", "account-2")
+            .await;
+        db.seed_message_for_thread(
+            "other-account-message",
+            "other-account-newest",
+            &now.to_rfc3339(),
+        )
+        .await;
 
         // These must not enter a historical review batch.
         sqlx::query("INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('backlog-00', ?)")
-            .bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
-        save_review_decision(&db.pool, "backlog-01", "keep").await.unwrap();
+            .bind(now.to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        save_review_decision(&db.pool, "backlog-01", "keep")
+            .await
+            .unwrap();
         sqlx::query("UPDATE threads SET archived = 1 WHERE id = 'backlog-02'")
-            .execute(&db.pool).await.unwrap();
+            .execute(&db.pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO mail_operations (id, account_id, thread_id, operation, status, next_retry_at, created_at, updated_at) VALUES ('backlog-operation', 'account-1', 'backlog-03', 'archive', 'pending', ?, ?, ?)")
             .bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(now.to_rfc3339())
             .execute(&db.pool).await.unwrap();
 
-        let candidates = backlog_analysis_candidates(&db.pool, "account-1", 20).await.unwrap();
+        let candidates = backlog_analysis_candidates(&db.pool, "account-1", 20)
+            .await
+            .unwrap();
         assert_eq!(candidates.len(), 20);
         assert_eq!(candidates.first().unwrap().thread_id, "backlog-04");
         assert_eq!(candidates.last().unwrap().thread_id, "backlog-23");
-        assert!(!candidates.iter().any(|item| item.thread_id == "other-account-newest"));
+        assert!(!candidates
+            .iter()
+            .any(|item| item.thread_id == "other-account-newest"));
 
-        let queued = enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now).await.unwrap();
+        let queued = enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now)
+            .await
+            .unwrap();
         assert_eq!(queued, 20);
         assert_eq!(
-            enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now).await.unwrap(),
+            enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now)
+                .await
+                .unwrap(),
             0,
             "repeating the action must not duplicate durable triage jobs",
         );
         let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM background_triage_jobs")
-            .fetch_one(&db.pool).await.unwrap();
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
         let mail_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations")
-            .fetch_one(&db.pool).await.unwrap();
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
         assert_eq!(jobs, 20);
-        assert_eq!(mail_operations, 1, "backlog selection must not create Gmail operations");
+        assert_eq!(
+            mail_operations, 1,
+            "backlog selection must not create Gmail operations"
+        );
         db.close().await;
     }
 
@@ -1450,18 +1639,40 @@ mod action_contract_tests {
         let now = Utc::now();
         for (thread_id, message_id, timestamp) in [
             ("review-today", "review-today-message", now.to_rfc3339()),
-            ("review-older", "review-older-message", (now - Duration::days(12)).to_rfc3339()),
+            (
+                "review-older",
+                "review-older-message",
+                (now - Duration::days(12)).to_rfc3339(),
+            ),
         ] {
             db.seed_thread(thread_id).await;
             sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
-                .bind(&timestamp).bind(thread_id).execute(&db.pool).await.unwrap();
-            db.seed_message_for_thread(message_id, thread_id, &timestamp).await;
-            sqlx::query("INSERT INTO email_analysis (thread_id, importance, analyzed_at) VALUES (?, 3, ?)")
-                .bind(thread_id).bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+                .bind(&timestamp)
+                .bind(thread_id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            db.seed_message_for_thread(message_id, thread_id, &timestamp)
+                .await;
+            sqlx::query(
+                "INSERT INTO email_analysis (thread_id, importance, analyzed_at) VALUES (?, 3, ?)",
+            )
+            .bind(thread_id)
+            .bind(now.to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .unwrap();
         }
 
-        let rows = review_queue_for_pool(&db.pool, Some(50), Some("newest".to_string())).await.unwrap();
-        assert_eq!(rows.iter().map(|row| row.thread_id.as_str()).collect::<Vec<_>>(), ["review-today", "review-older"]);
+        let rows = review_queue_for_pool(&db.pool, Some(50), Some("newest".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["review-today", "review-older"]
+        );
         db.close().await;
     }
 
@@ -1472,13 +1683,32 @@ mod action_contract_tests {
         let received_at = now - Duration::days(12);
         db.seed_thread("historical-pending").await;
         sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = 'historical-pending'")
-            .bind(received_at.to_rfc3339()).execute(&db.pool).await.unwrap();
-        db.seed_message_for_thread("historical-pending-message", "historical-pending", &received_at.to_rfc3339()).await;
+            .bind(received_at.to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        db.seed_message_for_thread(
+            "historical-pending-message",
+            "historical-pending",
+            &received_at.to_rfc3339(),
+        )
+        .await;
         crate::commands::triage_worker::enqueue_triage_job(
-            &db.pool, "historical-pending", "historical-pending-message", received_at, now,
-        ).await.unwrap();
+            &db.pool,
+            "historical-pending",
+            "historical-pending-message",
+            received_at,
+            now,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(background_analysis_pending_count(&db.pool, now).await.unwrap(), 1);
+        assert_eq!(
+            background_analysis_pending_count(&db.pool, now)
+                .await
+                .unwrap(),
+            1
+        );
         db.close().await;
     }
 
@@ -1491,7 +1721,9 @@ mod action_contract_tests {
         assert!(!primary.contains("\"description\""));
         assert!(primary.contains("any concrete event"));
         assert!(!fallback.contains("\"calendar_event\""));
-        assert!(should_retry_without_calendar("model did not return valid JSON (EOF)"));
+        assert!(should_retry_without_calendar(
+            "model did not return valid JSON (EOF)"
+        ));
         assert!(!should_retry_without_calendar("could not reach Ollama"));
     }
 }

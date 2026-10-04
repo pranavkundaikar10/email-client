@@ -24,25 +24,29 @@ pub struct SendResult {
 }
 
 #[tauri::command]
-pub async fn send_email(
-    app: tauri::AppHandle,
-    req: SendRequest,
-) -> Result<SendResult, String> {
+pub async fn send_email(app: tauri::AppHandle, req: SendRequest) -> Result<SendResult, String> {
     let auth = crate::commands::auth::get_gmail_auth(&app, &req.from).await?;
 
-    let from_mailbox: Mailbox = req.from.parse().map_err(|e: lettre::address::AddressError| e.to_string())?;
+    let from_mailbox: Mailbox = req
+        .from
+        .parse()
+        .map_err(|e: lettre::address::AddressError| e.to_string())?;
 
     let mut builder = Message::builder()
         .from(from_mailbox.clone())
         .subject(&req.subject);
 
     for addr in &req.to {
-        let mb: Mailbox = addr.parse().map_err(|e: lettre::address::AddressError| e.to_string())?;
+        let mb: Mailbox = addr
+            .parse()
+            .map_err(|e: lettre::address::AddressError| e.to_string())?;
         builder = builder.to(mb);
     }
 
     for addr in &req.cc {
-        let mb: Mailbox = addr.parse().map_err(|e: lettre::address::AddressError| e.to_string())?;
+        let mb: Mailbox = addr
+            .parse()
+            .map_err(|e: lettre::address::AddressError| e.to_string())?;
         builder = builder.cc(mb);
     }
 
@@ -54,24 +58,23 @@ pub async fn send_email(
         builder = builder.references(refs.clone());
     }
 
-    let email = builder
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_PLAIN)
-                        .body(req.body.clone()),
-                )
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_HTML)
-                        .body(format!(
+    let email =
+        builder
+            .multipart(
+                MultiPart::alternative()
+                    .singlepart(
+                        SinglePart::builder()
+                            .header(ContentType::TEXT_PLAIN)
+                            .body(req.body.clone()),
+                    )
+                    .singlepart(SinglePart::builder().header(ContentType::TEXT_HTML).body(
+                        format!(
                             "<div style=\"font-family:sans-serif;font-size:14px;\">{}</div>",
                             req.body.replace('\n', "<br>")
-                        )),
-                ),
-        )
-        .map_err(|e| e.to_string())?;
+                        ),
+                    )),
+            )
+            .map_err(|e| e.to_string())?;
 
     let (secret, mechanism) = match auth {
         crate::commands::auth::GmailAuth::AppPassword(password) => (password, Mechanism::Plain),

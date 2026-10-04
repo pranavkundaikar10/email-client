@@ -21,6 +21,7 @@ interface AppState {
   setThreads: (threads: Thread[]) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setActiveSplitId: (id: string | null) => void;
+  removeThreadsFromVisibleList: (ids: string[]) => void;
   toggleThreadCheck: (id: string) => void;
   clearChecked: () => void;
   addToast: (message: string, options?: Omit<Toast, "id" | "message">) => void;
@@ -45,6 +46,26 @@ export const useAppStore = create<AppState>((set, get) => ({
   setThreads: (threads) => set({ threads }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setActiveSplitId: (id) => set({ activeSplitId: id }),
+  removeThreadsFromVisibleList: (ids) => set((state) => {
+    const idSet = new Set(ids);
+    const remaining = state.threads.filter((thread) => !idSet.has(thread.id));
+    let selectedThreadId = state.selectedThreadId;
+
+    if (selectedThreadId && idSet.has(selectedThreadId)) {
+      const selectedIndex = state.threads.findIndex((thread) => thread.id === selectedThreadId);
+      // Select the next rendered survivor first; if the removed thread was
+      // last, select its previous neighbor. This preserves J/K continuity.
+      const fallback = state.threads.slice(selectedIndex + 1).find((thread) => !idSet.has(thread.id))
+        ?? state.threads.slice(0, selectedIndex).reverse().find((thread) => !idSet.has(thread.id));
+      selectedThreadId = fallback?.id ?? null;
+    }
+
+    return {
+      threads: remaining,
+      selectedThreadId,
+      checkedThreadIds: new Set([...state.checkedThreadIds].filter((id) => !idSet.has(id))),
+    };
+  }),
 
   toggleThreadCheck: (id) => set((state) => {
     const next = new Set(state.checkedThreadIds);

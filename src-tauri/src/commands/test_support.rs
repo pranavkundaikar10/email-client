@@ -10,10 +10,18 @@ pub struct TestDatabase {
 
 impl TestDatabase {
     pub async fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("productive-email-test-{}.db", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("productive-email-test-{}.db", Uuid::new_v4()));
         let url = format!("sqlite://{}?mode=rwc", path.to_string_lossy());
-        let pool = SqlitePoolOptions::new().max_connections(1).connect(&url).await.expect("open test database");
-        sqlx::migrate!("./migrations").run(&pool).await.expect("apply production migrations");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("open test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("apply production migrations");
         Self { pool, path }
     }
 
@@ -24,7 +32,11 @@ impl TestDatabase {
 
     pub async fn seed_account(&self, account_id: &str, email: &str) {
         sqlx::query("INSERT OR IGNORE INTO accounts (id, email, provider) VALUES (?, ?, 'gmail')")
-            .bind(account_id).bind(email).execute(&self.pool).await.expect("seed account");
+            .bind(account_id)
+            .bind(email)
+            .execute(&self.pool)
+            .await
+            .expect("seed account");
     }
 
     pub async fn seed_thread_for_account(&self, thread_id: &str, account_id: &str) {

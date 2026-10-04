@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useHotkeys } from "react-hotkeys-hook";
-import { Search, Inbox, Star, Archive, X, Layers, Send, FileEdit, SlidersHorizontal, Maximize2, Minimize2 } from "lucide-react";
+import { Search, Inbox, Star, Archive, X, Layers, Send, FileEdit, SlidersHorizontal, Maximize2, Minimize2, FolderInput } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { api } from "../../lib/api";
 import { useAppStore } from "../../store";
@@ -22,15 +22,17 @@ interface Props {
   onClose: () => void;
   splits?: { id: string; label: string }[];
   onSplitChange?: (id: string) => void;
+  activeSplitId?: string | null;
   onSplitsSettings: () => void;
   onToggleFullscreen: () => void;
   isSimpleFullscreen: boolean;
 }
 
-export default function CommandPalette({ accountId, onViewChange, onClose, splits, onSplitChange, onSplitsSettings, onToggleFullscreen, isSimpleFullscreen }: Props) {
+export default function CommandPalette({ accountId, onViewChange, onClose, splits, onSplitChange, activeSplitId, onSplitsSettings, onToggleFullscreen, isSimpleFullscreen }: Props) {
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
-  const { setSelectedThread } = useAppStore();
+  const { setSelectedThread, selectedThreadId, addToast } = useAppStore();
+  const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -49,7 +51,37 @@ export default function CommandPalette({ accountId, onViewChange, onClose, split
     onSelect: () => { onViewChange("inbox"); onSplitChange?.(s.id); onClose(); },
   }));
 
+  const assignSplitActions: Action[] = selectedThreadId && accountId
+    ? (splits ?? []).map((s) => ({
+        id: `assign-split-${s.id}`,
+        label: `Route future mail from this sender to ${s.label}`,
+        icon: FolderInput,
+        onSelect: () => {
+          void api.addThreadSenderToSplitRule(accountId, selectedThreadId, s.id)
+            .then((resolvedSplitId) => {
+              queryClient.invalidateQueries({ queryKey: ["threads"] });
+              queryClient.invalidateQueries({ queryKey: ["unread_counts"] });
+              queryClient.invalidateQueries({ queryKey: ["search"] });
+              // A sender rule can move this thread out of the split currently
+              // rendered in the sidebar. Advance using the same neighbor rule
+              // as archive/delete before the query refresh arrives.
+              if (activeSplitId && activeSplitId !== resolvedSplitId) {
+                useAppStore.getState().removeThreadsFromVisibleList([selectedThreadId]);
+              }
+              if (resolvedSplitId === s.id) {
+                addToast(`Future mail from this sender will go to ${s.label}.`);
+              } else {
+                addToast("Sender rule was saved, but another exact sender rule has priority.");
+              }
+              onClose();
+            })
+            .catch((error) => addToast(`Could not add sender rule: ${String(error)}`));
+        },
+      }))
+    : [];
+
   const staticActions: Action[] = [
+    ...assignSplitActions,
     ...splitActions,
     {
       id: "inbox",

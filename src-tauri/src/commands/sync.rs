@@ -1,24 +1,24 @@
+use crate::commands::auth::GmailAuth;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use imap::Session;
 use mailparse::{parse_mail, MailHeaderMap};
 use native_tls::TlsConnector;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::fs;
+use std::future::Future;
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use chrono::{DateTime, Utc};
-use chrono::NaiveDateTime;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use serde::Serialize;
-use tauri::{Emitter, Manager};
-use crate::commands::auth::GmailAuth;
 
 type ImapSession = Session<native_tls::TlsStream<TcpStream>>;
 
@@ -96,7 +96,10 @@ struct MessageMeta {
 }
 
 fn is_newsletter(headers: &mailparse::ParsedMail) -> bool {
-    if headers.headers.get_first_value("List-Unsubscribe").is_some()
+    if headers
+        .headers
+        .get_first_value("List-Unsubscribe")
+        .is_some()
         || headers.headers.get_first_value("List-Id").is_some()
     {
         return true;
@@ -121,8 +124,8 @@ fn connect(email: &str, auth: &GmailAuth) -> Result<ImapSession, String> {
         .map_err(|e| e.to_string())?
         .next()
         .ok_or_else(|| "Could not resolve imap.gmail.com".to_string())?;
-    let stream = TcpStream::connect_timeout(&address, IMAP_CONNECT_TIMEOUT)
-        .map_err(|e| e.to_string())?;
+    let stream =
+        TcpStream::connect_timeout(&address, IMAP_CONNECT_TIMEOUT).map_err(|e| e.to_string())?;
     stream
         .set_read_timeout(Some(IMAP_COMMAND_TIMEOUT))
         .map_err(|e| e.to_string())?;
@@ -135,17 +138,25 @@ fn connect(email: &str, auth: &GmailAuth) -> Result<ImapSession, String> {
     let mut client = imap::Client::new(tls_stream);
     client.read_greeting().map_err(|e| e.to_string())?;
     match auth {
-        GmailAuth::AppPassword(password) => client.login(email, password).map_err(|(e, _)| e.to_string()),
+        GmailAuth::AppPassword(password) => client
+            .login(email, password)
+            .map_err(|(e, _)| e.to_string()),
         GmailAuth::OAuthAccessToken(token) => {
-            struct XOAuth2<'a> { email: &'a str, token: &'a str }
+            struct XOAuth2<'a> {
+                email: &'a str,
+                token: &'a str,
+            }
             impl imap::Authenticator for XOAuth2<'_> {
                 type Response = Vec<u8>;
                 fn process(&self, _challenge: &[u8]) -> Self::Response {
-                    format!("user={}\x01auth=Bearer {}\x01\x01", self.email, self.token).into_bytes()
+                    format!("user={}\x01auth=Bearer {}\x01\x01", self.email, self.token)
+                        .into_bytes()
                 }
             }
             let xoauth2 = XOAuth2 { email, token };
-            client.authenticate("XOAUTH2", &xoauth2).map_err(|(e, _)| e.to_string())
+            client
+                .authenticate("XOAUTH2", &xoauth2)
+                .map_err(|(e, _)| e.to_string())
         }
     }
 }
@@ -178,9 +189,9 @@ pub fn stop_inbox_idle(worker: tauri::State<'_, InboxIdleWorker>, email: String)
 fn run_inbox_idle_listener(app: tauri::AppHandle, email: String, worker: InboxIdleWorker) {
     while worker.is_active(&email) {
         let result = (|| -> Result<(), String> {
-            let auth = tauri::async_runtime::block_on(
-                crate::commands::auth::get_gmail_auth(&app, &email),
-            )?;
+            let auth = tauri::async_runtime::block_on(crate::commands::auth::get_gmail_auth(
+                &app, &email,
+            ))?;
             let mut session = connect(&email, &auth)?;
             session.select("INBOX").map_err(|e| e.to_string())?;
 
@@ -240,9 +251,7 @@ fn fetch_headers_query(
     if older_sync {
         eprintln!("Older email sync: searching Gmail with {imap_query}");
     }
-    let search_result = session
-        .uid_search(imap_query)
-        .map_err(|e| e.to_string())?;
+    let search_result = session.uid_search(imap_query).map_err(|e| e.to_string())?;
 
     // Capture the full UID set before truncation — used for reconciliation.
     let all_inbox_uids: std::collections::HashSet<u32> = search_result.iter().cloned().collect();
@@ -259,7 +268,11 @@ fn fetch_headers_query(
     uids.sort_unstable_by(|a, b| b.cmp(a));
     uids.truncate(limit);
     if older_sync {
-        eprintln!("Older email sync: Gmail found {} messages; fetching {} headers", all_inbox_uids.len(), uids.len());
+        eprintln!(
+            "Older email sync: Gmail found {} messages; fetching {} headers",
+            all_inbox_uids.len(),
+            uids.len()
+        );
     }
 
     let uid_set = uids
@@ -276,39 +289,54 @@ fn fetch_headers_query(
 
     let result = parse_fetched_messages(&messages);
     if older_sync {
-        eprintln!("Older email sync: received {} message headers", result.len());
+        eprintln!(
+            "Older email sync: received {} message headers",
+            result.len()
+        );
     }
     session.logout().ok();
     Ok((result, all_inbox_uids))
 }
 
-fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetch>>) -> Vec<MessageMeta> {
+fn parse_fetched_messages(
+    messages: &imap::types::ZeroCopy<Vec<imap::types::Fetch>>,
+) -> Vec<MessageMeta> {
     let mut result = Vec::with_capacity(messages.len());
     for msg in messages.iter() {
         let imap_uid = msg.uid.unwrap_or(msg.message).to_string();
         let flags = msg.flags();
         let unread = !flags.iter().any(|f| matches!(f, imap::types::Flag::Seen));
-        let starred = flags.iter().any(|f| matches!(f, imap::types::Flag::Flagged));
+        let starred = flags
+            .iter()
+            .any(|f| matches!(f, imap::types::Flag::Flagged));
 
         let header_bytes = msg.header().unwrap_or(&[]);
         let parsed = parse_mail(header_bytes).ok();
 
-        let subject = parsed.as_ref()
+        let subject = parsed
+            .as_ref()
             .and_then(|p| p.headers.get_first_value("Subject"))
             .unwrap_or_default();
 
-        let from_raw = parsed.as_ref()
+        let from_raw = parsed
+            .as_ref()
             .and_then(|p| p.headers.get_first_value("From"))
             .unwrap_or_default();
         let (from_name, from_email) = parse_from(&from_raw);
 
-        let to_raw = parsed.as_ref()
+        let to_raw = parsed
+            .as_ref()
             .and_then(|p| p.headers.get_first_value("To"))
             .unwrap_or_default();
-        let to_parts: Vec<String> = to_raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let to_parts: Vec<String> = to_raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let to_emails = serde_json::to_string(&to_parts).unwrap_or_else(|_| "[]".to_string());
 
-        let date_raw = parsed.as_ref()
+        let date_raw = parsed
+            .as_ref()
             .and_then(|p| p.headers.get_first_value("Date"))
             .unwrap_or_default();
         // INTERNALDATE is assigned by Gmail when it accepts the message and
@@ -319,14 +347,17 @@ fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetc
             .map(|date| date.with_timezone(&Utc).to_rfc3339())
             .unwrap_or_else(|| parse_date(&date_raw));
 
-        let message_id = parsed.as_ref()
+        let message_id = parsed
+            .as_ref()
             .and_then(|p| p.headers.get_first_value("Message-ID"))
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| imap_uid.clone());
 
-        let thread_id = parsed.as_ref()
+        let thread_id = parsed
+            .as_ref()
             .and_then(|p| {
-                p.headers.get_first_value("In-Reply-To")
+                p.headers
+                    .get_first_value("In-Reply-To")
                     .or_else(|| p.headers.get_first_value("References"))
             })
             .and_then(|s| s.split_whitespace().next().map(|s| s.trim().to_string()))
@@ -336,8 +367,17 @@ fn parse_fetched_messages(messages: &imap::types::ZeroCopy<Vec<imap::types::Fetc
         let newsletter = parsed.as_ref().map(|p| is_newsletter(p)).unwrap_or(false);
 
         result.push(MessageMeta {
-            imap_uid, message_id, thread_id, subject, snippet,
-            from_name, from_email, to_emails, received_at, unread, starred,
+            imap_uid,
+            message_id,
+            thread_id,
+            subject,
+            snippet,
+            from_name,
+            from_email,
+            to_emails,
+            received_at,
+            unread,
+            starred,
             is_newsletter: newsletter,
         });
     }
@@ -357,16 +397,22 @@ fn fetch_headers(
 }
 
 // Fetches from a non-INBOX folder located via RFC 6154 special-use attribute.
-fn fetch_folder_headers(email: &str, auth: &GmailAuth, special_attr: &str, fallback: &str) -> Result<Vec<MessageMeta>, String> {
+fn fetch_folder_headers(
+    email: &str,
+    auth: &GmailAuth,
+    special_attr: &str,
+    fallback: &str,
+) -> Result<Vec<MessageMeta>, String> {
     let mut session = connect(email, auth)?;
-    let mailbox = find_special_mailbox(&mut session, special_attr)
-        .unwrap_or_else(|| fallback.to_string());
+    let mailbox =
+        find_special_mailbox(&mut session, special_attr).unwrap_or_else(|| fallback.to_string());
     session.select(&mailbox).map_err(|e| e.to_string())?;
 
     let since = (Utc::now() - chrono::Duration::days(SYNC_DAYS))
         .format("%d-%b-%Y")
         .to_string();
-    let search_result = session.uid_search(&format!("SINCE {}", since))
+    let search_result = session
+        .uid_search(&format!("SINCE {}", since))
         .map_err(|e| e.to_string())?;
 
     if search_result.is_empty() {
@@ -377,23 +423,42 @@ fn fetch_folder_headers(email: &str, auth: &GmailAuth, special_attr: &str, fallb
     let mut uids: Vec<u32> = search_result.into_iter().collect();
     uids.sort_unstable_by(|a, b| b.cmp(a));
     uids.truncate(SYNC_LIMIT);
-    let uid_set = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+    let uid_set = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
 
     let fetch_items = "(FLAGS INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])";
-    let messages = session.uid_fetch(&uid_set, fetch_items).map_err(|e| e.to_string())?;
+    let messages = session
+        .uid_fetch(&uid_set, fetch_items)
+        .map_err(|e| e.to_string())?;
     let result = parse_fetched_messages(&messages);
     session.logout().ok();
     Ok(result)
 }
 
-fn fetch_older_headers(email: &str, auth: &GmailAuth, before_imap_date: &str) -> Result<Vec<MessageMeta>, String> {
-    let (metas, _) = fetch_headers_query(email, auth, &format!("BEFORE {}", before_imap_date), 200)?;
+fn fetch_older_headers(
+    email: &str,
+    auth: &GmailAuth,
+    before_imap_date: &str,
+) -> Result<Vec<MessageMeta>, String> {
+    let (metas, _) =
+        fetch_headers_query(email, auth, &format!("BEFORE {}", before_imap_date), 200)?;
     Ok(metas)
 }
 
-async fn write_metas_to_db(pool: &SqlitePool, account_id: &str, email: &str, folder: &str, metas: Vec<MessageMeta>) -> Result<usize, String> {
+async fn write_metas_to_db(
+    pool: &SqlitePool,
+    account_id: &str,
+    email: &str,
+    folder: &str,
+    metas: Vec<MessageMeta>,
+) -> Result<usize, String> {
     let count = metas.len();
-    if count == 0 { return Ok(0); }
+    if count == 0 {
+        return Ok(0);
+    }
 
     let split_rows = crate::commands::splits::load_splits(pool).await?;
 
@@ -408,7 +473,10 @@ async fn write_metas_to_db(pool: &SqlitePool, account_id: &str, email: &str, fol
 
     for m in &metas {
         let category = crate::commands::splits::evaluate_splits(
-            &split_rows, &m.from_email, &m.subject, m.is_newsletter,
+            &split_rows,
+            &m.from_email,
+            &m.subject,
+            m.is_newsletter,
         );
 
         sqlx::query(
@@ -452,7 +520,8 @@ async fn write_metas_to_db(pool: &SqlitePool, account_id: &str, email: &str, fol
             "INSERT OR REPLACE INTO threads_fts(rowid, subject, snippet, from_email)
              SELECT rowid, subject, snippet, ? FROM threads WHERE id = ?",
         )
-        .bind(&m.from_email).bind(&m.thread_id)
+        .bind(&m.from_email)
+        .bind(&m.thread_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -495,13 +564,12 @@ async fn reconcile_removed(
     .map_err(|e| e.to_string())?;
 
     for (thread_id,) in thread_ids {
-        let msg_uids: Vec<(String,)> = sqlx::query_as(
-            "SELECT imap_uid FROM messages WHERE thread_id = ? AND imap_uid != ''",
-        )
-        .bind(&thread_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        let msg_uids: Vec<(String,)> =
+            sqlx::query_as("SELECT imap_uid FROM messages WHERE thread_id = ? AND imap_uid != ''")
+                .bind(&thread_id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
         if msg_uids.is_empty() {
             continue;
@@ -591,20 +659,30 @@ pub(crate) async fn sync_older_for_account(
     // current RFC 3339 form and legacy SQLite timestamp formats explicitly.
     let imap_date = DateTime::parse_from_rfc3339(&before_date)
         .map(|date| date.with_timezone(&Utc).format("%d-%b-%Y").to_string())
-        .or_else(|_| NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%dT%H:%M:%S")
-            .map(|date| date.format("%d-%b-%Y").to_string()))
-        .or_else(|_| NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%d %H:%M:%S")
-            .map(|date| date.format("%d-%b-%Y").to_string()))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%dT%H:%M:%S")
+                .map(|date| date.format("%d-%b-%Y").to_string())
+        })
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(&before_date, "%Y-%m-%d %H:%M:%S")
+                .map(|date| date.format("%d-%b-%Y").to_string())
+        })
         .map_err(|_| format!("Could not determine the date for older email sync: {before_date}"))?;
 
-    let metas = tokio::time::timeout(Duration::from_secs(45), tokio::task::spawn_blocking(move || {
-        fetch_older_headers(&email_for_imap, &auth, &imap_date)
-    }))
+    let metas = tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::task::spawn_blocking(move || {
+            fetch_older_headers(&email_for_imap, &auth, &imap_date)
+        }),
+    )
     .await
     .map_err(|_| "Older email sync timed out after 45 seconds while contacting Gmail".to_string())?
     .map_err(|e| e.to_string())??;
 
-    eprintln!("Older email sync: writing {} messages to the local database", metas.len());
+    eprintln!(
+        "Older email sync: writing {} messages to the local database",
+        metas.len()
+    );
     write_metas_to_db(pool, account_id, &email, "inbox", metas).await
 }
 
@@ -642,7 +720,6 @@ pub async fn sync_drafts(
     write_metas_to_db(pool.inner(), &account_id, &email, "drafts", metas).await
 }
 
-
 #[tauri::command]
 pub async fn fetch_message_body(
     app: tauri::AppHandle,
@@ -651,7 +728,14 @@ pub async fn fetch_message_body(
     message_id: String,
     force: Option<bool>,
 ) -> Result<crate::commands::db::MessageRow, String> {
-    fetch_message_body_for_account(&app, pool.inner(), &email, &message_id, force.unwrap_or(false)).await
+    fetch_message_body_for_account(
+        &app,
+        pool.inner(),
+        &email,
+        &message_id,
+        force.unwrap_or(false),
+    )
+    .await
 }
 
 /// Fetches one message using IMAP BODY.PEEK and stores it locally. Shared by
@@ -666,27 +750,26 @@ pub(crate) async fn fetch_message_body_for_account(
 ) -> Result<crate::commands::db::MessageRow, String> {
     let account_id = crate::commands::auth::account_id_for_email(app, email)?;
     // Use i64 for body_fetched — SQLite stores booleans as INTEGER
-    let row: Option<(i64, String)> = sqlx::query_as(
-        "SELECT body_fetched, imap_uid FROM messages WHERE id = ?",
-    )
-    .bind(message_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let (body_fetched_int, imap_uid) = row
-        .ok_or_else(|| format!("Message {} not found in DB", message_id))?;
-    let body_fetched = body_fetched_int != 0;
-
-    let thread_id: String =
-        sqlx::query_scalar("SELECT thread_id FROM messages WHERE id = ?")
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT body_fetched, imap_uid FROM messages WHERE id = ?")
             .bind(message_id)
-            .fetch_one(pool)
+            .fetch_optional(pool)
             .await
             .map_err(|e| e.to_string())?;
 
+    let (body_fetched_int, imap_uid) =
+        row.ok_or_else(|| format!("Message {} not found in DB", message_id))?;
+    let body_fetched = body_fetched_int != 0;
+
+    let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     if body_fetched && !force {
-        let messages = crate::commands::db::get_messages_for_account(pool, &account_id, &thread_id).await?;
+        let messages =
+            crate::commands::db::get_messages_for_account(pool, &account_id, &thread_id).await?;
         return messages
             .into_iter()
             .find(|m| m.id == message_id)
@@ -706,50 +789,58 @@ pub(crate) async fn fetch_message_body_for_account(
     let message_id_for_fetch = message_id.to_string();
     let email_for_imap = email.to_string();
 
-    let (body_html, body_text, has_attachments, attachments) = tokio::task::spawn_blocking(move || {
-        let mut session = connect(&email_for_imap, &auth)?;
+    let (body_html, body_text, has_attachments, attachments) =
+        tokio::task::spawn_blocking(move || {
+            let mut session = connect(&email_for_imap, &auth)?;
 
-        let mailbox = match folder.as_str() {
-            "sent"   => find_special_mailbox(&mut session, "\\Sent")
-                            .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
-            "drafts" => find_special_mailbox(&mut session, "\\Drafts")
-                            .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
-            _        => "INBOX".to_string(),
-        };
-        session.select(&mailbox).map_err(|e| e.to_string())?;
+            let mailbox = match folder.as_str() {
+                "sent" => find_special_mailbox(&mut session, "\\Sent")
+                    .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+                "drafts" => find_special_mailbox(&mut session, "\\Drafts")
+                    .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+                _ => "INBOX".to_string(),
+            };
+            session.select(&mailbox).map_err(|e| e.to_string())?;
 
-        // If imap_uid is missing (old row), find it via Message-ID header search
-        let uid_to_fetch = if imap_uid.is_empty() {
-            let search = session
-                .uid_search(format!("HEADER MESSAGE-ID \"{}\"", message_id_for_fetch))
+            // If imap_uid is missing (old row), find it via Message-ID header search
+            let uid_to_fetch = if imap_uid.is_empty() {
+                let search = session
+                    .uid_search(format!("HEADER MESSAGE-ID \"{}\"", message_id_for_fetch))
+                    .map_err(|e| e.to_string())?;
+                search
+                    .into_iter()
+                    .next()
+                    .map(|u| u.to_string())
+                    .ok_or_else(|| {
+                        format!(
+                            "Could not locate message {} via search",
+                            message_id_for_fetch
+                        )
+                    })?
+            } else {
+                imap_uid
+            };
+
+            let msgs = session
+                .uid_fetch(&uid_to_fetch, "BODY.PEEK[]")
                 .map_err(|e| e.to_string())?;
-            search
-                .into_iter()
-                .next()
-                .map(|u| u.to_string())
-                .ok_or_else(|| format!("Could not locate message {} via search", message_id_for_fetch))?
-        } else {
-            imap_uid
-        };
 
-        let msgs = session
-            .uid_fetch(&uid_to_fetch, "BODY.PEEK[]")
-            .map_err(|e| e.to_string())?;
+            let fetch = msgs
+                .first()
+                .ok_or_else(|| format!("UID {} not found in INBOX", uid_to_fetch))?;
 
-        let fetch = msgs.first()
-            .ok_or_else(|| format!("UID {} not found in INBOX", uid_to_fetch))?;
+            let raw = fetch
+                .body()
+                .ok_or_else(|| format!("UID {} returned no body data", uid_to_fetch))?;
 
-        let raw = fetch.body()
-            .ok_or_else(|| format!("UID {} returned no body data", uid_to_fetch))?;
-
-        let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
-        let (body_html, body_text, has_attachments) = extract_body_parts(&parsed);
-        let attachments = extract_attachment_metadata(&parsed);
-        session.logout().ok();
-        Ok::<_, String>((body_html, body_text, has_attachments, attachments))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+            let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
+            let (body_html, body_text, has_attachments) = extract_body_parts(&parsed);
+            let attachments = extract_attachment_metadata(&parsed);
+            session.logout().ok();
+            Ok::<_, String>((body_html, body_text, has_attachments, attachments))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
 
     sqlx::query(
         "UPDATE messages SET body_html = ?, body_text = ?, has_attachments = ?, body_fetched = 1 WHERE id = ?",
@@ -763,7 +854,8 @@ pub(crate) async fn fetch_message_body_for_account(
     .map_err(|e| e.to_string())?;
     store_attachment_metadata(pool, &message_id_clone, &attachments).await?;
 
-    let messages = crate::commands::db::get_messages_for_account(pool, &account_id, &thread_id).await?;
+    let messages =
+        crate::commands::db::get_messages_for_account(pool, &account_id, &thread_id).await?;
     messages
         .into_iter()
         .find(|m| m.id == message_id_clone)
@@ -780,7 +872,10 @@ struct DownloadAttachmentRow {
     account_id: String,
 }
 
-fn part_at_path<'a>(mail: &'a mailparse::ParsedMail<'a>, path: &str) -> Option<&'a mailparse::ParsedMail<'a>> {
+fn part_at_path<'a>(
+    mail: &'a mailparse::ParsedMail<'a>,
+    path: &str,
+) -> Option<&'a mailparse::ParsedMail<'a>> {
     let mut part = mail;
     for segment in path.split('.') {
         let index = segment.parse::<usize>().ok()?.checked_sub(1)?;
@@ -792,15 +887,28 @@ fn part_at_path<'a>(mail: &'a mailparse::ParsedMail<'a>, path: &str) -> Option<&
 fn safe_download_filename(filename: &str) -> String {
     let safe: String = filename
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect();
     let safe = safe.trim().trim_matches('.');
-    if safe.is_empty() { "attachment".to_string() } else { safe.to_string() }
+    if safe.is_empty() {
+        "attachment".to_string()
+    } else {
+        safe.to_string()
+    }
 }
 
 fn save_download(directory: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let original = Path::new(filename);
-    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("attachment");
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
     let extension = original.extension().and_then(|value| value.to_str());
     for suffix in 0..10_000 {
         let name = match (suffix, extension) {
@@ -809,9 +917,14 @@ fn save_download(directory: &Path, filename: &str, bytes: &[u8]) -> Result<PathB
             _ => format!("{stem} ({suffix})"),
         };
         let candidate = directory.join(name);
-        match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(mut file) => {
-                file.write_all(bytes).map_err(|e| format!("Could not save attachment: {e}"))?;
+                file.write_all(bytes)
+                    .map_err(|e| format!("Could not save attachment: {e}"))?;
                 return Ok(candidate);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -819,9 +932,13 @@ fn save_download(directory: &Path, filename: &str, bytes: &[u8]) -> Result<PathB
         }
     }
     let candidate = directory.join(format!("{stem}-{}.download", Uuid::new_v4()));
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&candidate)
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&candidate)
         .map_err(|e| format!("Could not save attachment: {e}"))?;
-    file.write_all(bytes).map_err(|e| format!("Could not save attachment: {e}"))?;
+    file.write_all(bytes)
+        .map_err(|e| format!("Could not save attachment: {e}"))?;
     Ok(candidate)
 }
 
@@ -845,20 +962,27 @@ pub async fn download_attachment(
     .bind(attachment_id)
     .fetch_one(pool.inner())
     .await
-    .map_err(|_| "Attachment is no longer available. Reopen the email and try again.".to_string())?;
+    .map_err(|_| {
+        "Attachment is no longer available. Reopen the email and try again.".to_string()
+    })?;
     let expected_account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     if row.account_id != expected_account_id {
         return Err("This attachment belongs to a different account.".to_string());
     }
 
     let auth = crate::commands::auth::get_gmail_auth(&app, &row.account_id).await?;
-    let downloads = app.path().download_dir().map_err(|e| format!("Could not find Downloads: {e}"))?;
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|e| format!("Could not find Downloads: {e}"))?;
     let filename = safe_download_filename(&row.filename);
     tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &auth)?;
         let mailbox = match row.folder.as_str() {
-            "sent" => find_special_mailbox(&mut session, "\\Sent").unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
-            "drafts" => find_special_mailbox(&mut session, "\\Drafts").unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            "sent" => find_special_mailbox(&mut session, "\\Sent")
+                .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "drafts" => find_special_mailbox(&mut session, "\\Drafts")
+                .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
             _ => "INBOX".to_string(),
         };
         session.select(&mailbox).map_err(|e| e.to_string())?;
@@ -869,14 +993,23 @@ pub async fn download_attachment(
                 .into_iter()
                 .next()
                 .map(|value| value.to_string())
-                .ok_or_else(|| "Could not find this attachment in Gmail. Try syncing first.".to_string())?
+                .ok_or_else(|| {
+                    "Could not find this attachment in Gmail. Try syncing first.".to_string()
+                })?
         } else {
             row.imap_uid
         };
-        let response = session.uid_fetch(&uid, "BODY.PEEK[]").map_err(|e| e.to_string())?;
-        let raw = response.first().and_then(|message| message.body()).ok_or_else(|| "Gmail returned no attachment data.".to_string())?;
+        let response = session
+            .uid_fetch(&uid, "BODY.PEEK[]")
+            .map_err(|e| e.to_string())?;
+        let raw = response
+            .first()
+            .and_then(|message| message.body())
+            .ok_or_else(|| "Gmail returned no attachment data.".to_string())?;
         let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
-        let part = part_at_path(&parsed, &row.part_path).ok_or_else(|| "The attachment structure changed. Reopen the email and try again.".to_string())?;
+        let part = part_at_path(&parsed, &row.part_path).ok_or_else(|| {
+            "The attachment structure changed. Reopen the email and try again.".to_string()
+        })?;
         let bytes = part.get_body_raw().map_err(|e| e.to_string())?;
         fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
         let path = save_download(&downloads, &filename, &bytes)?;
@@ -905,7 +1038,9 @@ pub async fn prefetch_thread_bodies(
 ) -> Result<usize, String> {
     let account_id = crate::commands::auth::account_id_for_email(&app, &email)?;
     let thread_ids: Vec<String> = thread_ids.into_iter().take(3).collect();
-    if thread_ids.is_empty() { return Ok(0); }
+    if thread_ids.is_empty() {
+        return Ok(0);
+    }
 
     let placeholders = std::iter::repeat("?")
         .take(thread_ids.len())
@@ -922,35 +1057,65 @@ pub async fn prefetch_thread_bodies(
            LIMIT 3"#,
     );
     let mut query = sqlx::query_as::<_, PrefetchMessageRow>(&sql);
-    for thread_id in &thread_ids { query = query.bind(thread_id); }
-    let mut rows = query.bind(&account_id).fetch_all(pool.inner()).await.map_err(|e| e.to_string())?;
-    let Some(first) = rows.first() else { return Ok(0); };
+    for thread_id in &thread_ids {
+        query = query.bind(thread_id);
+    }
+    let mut rows = query
+        .bind(&account_id)
+        .fetch_all(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(first) = rows.first() else {
+        return Ok(0);
+    };
 
     // A sidebar normally contains one folder. Search can mix folders, so only
     // prefetch the matching folder here rather than opening extra connections.
     let folder = first.folder.clone();
     rows.retain(|row| row.folder == folder);
-    let uid_to_id: HashMap<u32, String> = rows.iter()
-        .filter_map(|row| row.imap_uid.parse::<u32>().ok().map(|uid| (uid, row.id.clone())))
+    let uid_to_id: HashMap<u32, String> = rows
+        .iter()
+        .filter_map(|row| {
+            row.imap_uid
+                .parse::<u32>()
+                .ok()
+                .map(|uid| (uid, row.id.clone()))
+        })
         .collect();
-    if uid_to_id.is_empty() { return Ok(0); }
+    if uid_to_id.is_empty() {
+        return Ok(0);
+    }
 
     let auth = crate::commands::auth::get_gmail_auth(&app, &account_id).await?;
-    let uid_set = uid_to_id.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let uid_set = uid_to_id
+        .keys()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let fetched = tokio::task::spawn_blocking(move || {
         let mut session = connect(&email, &auth)?;
         let mailbox = match folder.as_str() {
-            "sent" => find_special_mailbox(&mut session, "\\Sent").unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
-            "drafts" => find_special_mailbox(&mut session, "\\Drafts").unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            "sent" => find_special_mailbox(&mut session, "\\Sent")
+                .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "drafts" => find_special_mailbox(&mut session, "\\Drafts")
+                .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
             _ => "INBOX".to_string(),
         };
         session.select(&mailbox).map_err(|e| e.to_string())?;
-        let responses = session.uid_fetch(&uid_set, "BODY.PEEK[]").map_err(|e| e.to_string())?;
+        let responses = session
+            .uid_fetch(&uid_set, "BODY.PEEK[]")
+            .map_err(|e| e.to_string())?;
         let mut bodies = Vec::new();
         for response in responses.iter() {
-            let Some(uid) = response.uid else { continue; };
-            let Some(message_id) = uid_to_id.get(&uid) else { continue; };
-            let Some(raw) = response.body() else { continue; };
+            let Some(uid) = response.uid else {
+                continue;
+            };
+            let Some(message_id) = uid_to_id.get(&uid) else {
+                continue;
+            };
+            let Some(raw) = response.body() else {
+                continue;
+            };
             let parsed = parse_mail(raw).map_err(|e| e.to_string())?;
             let (html, text, has_attachments) = extract_body_parts(&parsed);
             let attachments = extract_attachment_metadata(&parsed);
@@ -958,7 +1123,9 @@ pub async fn prefetch_thread_bodies(
         }
         session.logout().ok();
         Ok::<_, String>(bodies)
-    }).await.map_err(|e| e.to_string())??;
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     let mut saved = 0;
     for (message_id, body_html, body_text, has_attachments, attachments) in fetched {
@@ -985,11 +1152,9 @@ fn find_special_mailbox(session: &mut ImapSession, attr: &str) -> Option<String>
     let names = session.list(None, Some("*")).ok()?;
     let attr_lc = attr.to_lowercase();
     for name in names.iter() {
-        let has_attr = name.attributes().iter().any(|a| {
-            match a {
-                imap::types::NameAttribute::Custom(s) => s.to_lowercase() == attr_lc,
-                _ => false,
-            }
+        let has_attr = name.attributes().iter().any(|a| match a {
+            imap::types::NameAttribute::Custom(s) => s.to_lowercase() == attr_lc,
+            _ => false,
         });
         if has_attr {
             return Some(name.name().to_string());
@@ -1000,7 +1165,10 @@ fn find_special_mailbox(session: &mut ImapSession, attr: &str) -> Option<String>
 
 // Resolve IMAP UIDs for a thread by searching Message-ID in the selected mailbox.
 // Always searches rather than trusting stored UIDs, since stored values can be stale.
-fn resolve_uids(session: &mut ImapSession, rows: &[(String, String)]) -> Result<Vec<String>, String> {
+fn resolve_uids(
+    session: &mut ImapSession,
+    rows: &[(String, String)],
+) -> Result<Vec<String>, String> {
     let mut uids = Vec::new();
 
     for (msg_id, stored_uid) in rows {
@@ -1035,13 +1203,12 @@ async fn imap_thread_is_in_special_mailbox(
         .fetch_one(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
-    )
-    .bind(thread_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, imap_uid FROM messages WHERE thread_id = ?")
+            .bind(thread_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     if rows.is_empty() {
         return Ok(false);
     }
@@ -1079,20 +1246,18 @@ async fn imap_move_thread(
     special_attr: &'static str,
     fallback: &'static str,
 ) -> Result<(), String> {
-    let account_id: String =
-        sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+    let account_id: String = sqlx::query_scalar("SELECT account_id FROM threads WHERE id = ?")
+        .bind(thread_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, imap_uid FROM messages WHERE thread_id = ?")
             .bind(thread_id)
-            .fetch_one(pool)
+            .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
-
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
-    )
-    .bind(thread_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
 
     let source_folder: String = sqlx::query_scalar("SELECT folder FROM threads WHERE id = ?")
         .bind(thread_id)
@@ -1112,11 +1277,11 @@ async fn imap_move_thread(
             .unwrap_or_else(|| fallback.to_string());
 
         let source_mailbox = match source_folder.as_str() {
-            "sent"   => find_special_mailbox(&mut session, "\\Sent")
-                            .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
+            "sent" => find_special_mailbox(&mut session, "\\Sent")
+                .unwrap_or_else(|| "[Gmail]/Sent Mail".to_string()),
             "drafts" => find_special_mailbox(&mut session, "\\Drafts")
-                            .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
-            _        => "INBOX".to_string(),
+                .unwrap_or_else(|| "[Gmail]/Drafts".to_string()),
+            _ => "INBOX".to_string(),
         };
         session.select(&source_mailbox).map_err(|e| e.to_string())?;
 
@@ -1219,7 +1384,10 @@ struct MailOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MailDeliveryAction { Archive, Trash }
+enum MailDeliveryAction {
+    Archive,
+    Trash,
+}
 
 /// Boundary for remote mail delivery. Production uses IMAP; tests use a fake
 /// implementation and therefore never connect to a mailbox.
@@ -1245,11 +1413,21 @@ struct ImapMailDelivery<'a> {
 }
 
 impl MailDelivery for ImapMailDelivery<'_> {
-    fn deliver<'a>(&'a self, thread_id: &'a str, action: MailDeliveryAction) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    fn deliver<'a>(
+        &'a self,
+        thread_id: &'a str,
+        action: MailDeliveryAction,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             match action {
-                MailDeliveryAction::Archive => imap_move_thread(self.app, self.pool, thread_id, "\\All", "[Gmail]/All Mail").await,
-                MailDeliveryAction::Trash => imap_move_thread(self.app, self.pool, thread_id, "\\Trash", "[Gmail]/Trash").await,
+                MailDeliveryAction::Archive => {
+                    imap_move_thread(self.app, self.pool, thread_id, "\\All", "[Gmail]/All Mail")
+                        .await
+                }
+                MailDeliveryAction::Trash => {
+                    imap_move_thread(self.app, self.pool, thread_id, "\\Trash", "[Gmail]/Trash")
+                        .await
+                }
             }
         })
     }
@@ -1259,12 +1437,22 @@ impl MailDelivery for ImapMailDelivery<'_> {
         thread_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
         Box::pin(async move {
-            imap_thread_is_in_special_mailbox(self.app, self.pool, thread_id, "\\Trash", "[Gmail]/Trash").await
+            imap_thread_is_in_special_mailbox(
+                self.app,
+                self.pool,
+                thread_id,
+                "\\Trash",
+                "[Gmail]/Trash",
+            )
+            .await
         })
     }
 }
 
-async fn dispatch_mail_delivery<D: MailDelivery>(delivery: &D, item: &MailOperation) -> Result<(), String> {
+async fn dispatch_mail_delivery<D: MailDelivery>(
+    delivery: &D,
+    item: &MailOperation,
+) -> Result<(), String> {
     let action = match item.operation.as_str() {
         "archive" => MailDeliveryAction::Archive,
         "trash" => MailDeliveryAction::Trash,
@@ -1276,8 +1464,14 @@ async fn dispatch_mail_delivery<D: MailDelivery>(delivery: &D, item: &MailOperat
 /// A Trash move is at-least-once across app sleep and network loss. Check the
 /// destination first so an earlier successful move whose IMAP response was
 /// lost is confirmed locally instead of replayed from the source mailbox.
-async fn deliver_or_confirm_mail_operation<D: MailDelivery>(delivery: &D, item: &MailOperation) -> Result<(), String> {
-    if item.operation == "trash" && item.remote_attempted_at.is_some() && delivery.thread_is_in_trash(&item.thread_id).await? {
+async fn deliver_or_confirm_mail_operation<D: MailDelivery>(
+    delivery: &D,
+    item: &MailOperation,
+) -> Result<(), String> {
+    if item.operation == "trash"
+        && item.remote_attempted_at.is_some()
+        && delivery.thread_is_in_trash(&item.thread_id).await?
+    {
         return Ok(());
     }
     dispatch_mail_delivery(delivery, item).await
@@ -1312,7 +1506,8 @@ async fn enqueue_mail_operation(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Email thread no longer exists locally".to_string())?;
     let now = Utc::now();
-    let execute_after = (now + chrono::Duration::seconds(OPERATION_UNDO_WINDOW_SECONDS)).to_rfc3339();
+    let execute_after =
+        (now + chrono::Duration::seconds(OPERATION_UNDO_WINDOW_SECONDS)).to_rfc3339();
     let now = now.to_rfc3339();
 
     // One current intent per thread. Repeating an action is safe and puts a
@@ -1419,13 +1614,12 @@ async fn imap_sync_thread_flags(
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "inbox".to_string());
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, imap_uid FROM messages WHERE thread_id = ?",
-    )
-    .bind(thread_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, imap_uid FROM messages WHERE thread_id = ?")
+            .bind(thread_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     let auth = crate::commands::auth::get_gmail_auth(app, &account_id).await?;
     let email = crate::commands::auth::account_email_for_id(app, &account_id)?;
 
@@ -1443,12 +1637,24 @@ async fn imap_sync_thread_flags(
         if !uids.is_empty() {
             let uid_set = uids.join(",");
             if let Some(read) = seen {
-                let operation = if read { "+FLAGS.SILENT (\\Seen)" } else { "-FLAGS.SILENT (\\Seen)" };
-                session.uid_store(&uid_set, operation).map_err(|e| e.to_string())?;
+                let operation = if read {
+                    "+FLAGS.SILENT (\\Seen)"
+                } else {
+                    "-FLAGS.SILENT (\\Seen)"
+                };
+                session
+                    .uid_store(&uid_set, operation)
+                    .map_err(|e| e.to_string())?;
             }
             if let Some(is_starred) = starred {
-                let operation = if is_starred { "+FLAGS.SILENT (\\Flagged)" } else { "-FLAGS.SILENT (\\Flagged)" };
-                session.uid_store(&uid_set, operation).map_err(|e| e.to_string())?;
+                let operation = if is_starred {
+                    "+FLAGS.SILENT (\\Flagged)"
+                } else {
+                    "-FLAGS.SILENT (\\Flagged)"
+                };
+                session
+                    .uid_store(&uid_set, operation)
+                    .map_err(|e| e.to_string())?;
             }
         }
         session.logout().ok();
@@ -1553,9 +1759,17 @@ async fn settle_mail_operation_result(
         }
         Err(error) => {
             let attempts = item.attempt_count + 1;
-            let status = if attempts >= MAX_OPERATION_ATTEMPTS { "failed" } else { "pending" };
+            let status = if attempts >= MAX_OPERATION_ATTEMPTS {
+                "failed"
+            } else {
+                "pending"
+            };
             // 10s, 30s, then surface the thread again with a clear error.
-            let delay_secs = match attempts { 1 => 10, 2 => 30, _ => 0 };
+            let delay_secs = match attempts {
+                1 => 10,
+                2 => 30,
+                _ => 0,
+            };
             let retry_at = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
             sqlx::query(
                 "UPDATE mail_operations SET status = ?, attempt_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
@@ -1599,7 +1813,9 @@ async fn process_mail_flag_operation(
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
-    let Some(item) = item else { return Ok(()); };
+    let Some(item) = item else {
+        return Ok(());
+    };
 
     sqlx::query("UPDATE mail_flag_operations SET status = 'in_progress', updated_at = ? WHERE id = ? AND revision = ?")
         .bind(now)
@@ -1623,8 +1839,16 @@ async fn process_mail_flag_operation(
         }
         Err(error) => {
             let attempts = item.attempt_count + 1;
-            let status = if attempts >= MAX_OPERATION_ATTEMPTS { "failed" } else { "pending" };
-            let delay_secs = match attempts { 1 => 10, 2 => 30, _ => 0 };
+            let status = if attempts >= MAX_OPERATION_ATTEMPTS {
+                "failed"
+            } else {
+                "pending"
+            };
+            let delay_secs = match attempts {
+                1 => 10,
+                2 => 30,
+                _ => 0,
+            };
             let retry_at = (Utc::now() + chrono::Duration::seconds(delay_secs)).to_rfc3339();
             let updated = sqlx::query(
                 "UPDATE mail_flag_operations SET status = ?, attempt_count = ?, next_retry_at = ?, last_error = ?, updated_at = ? WHERE id = ? AND revision = ?",
@@ -1662,9 +1886,16 @@ fn start_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailO
     });
 }
 
-fn start_delayed_operation_worker(app: tauri::AppHandle, pool: SqlitePool, worker: MailOperationWorker) {
+fn start_delayed_operation_worker(
+    app: tauri::AppHandle,
+    pool: SqlitePool,
+    worker: MailOperationWorker,
+) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(OPERATION_UNDO_WINDOW_SECONDS as u64)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(
+            OPERATION_UNDO_WINDOW_SECONDS as u64,
+        ))
+        .await;
         if let Err(error) = process_mail_operations(&app, &pool, &worker).await {
             eprintln!("Unable to process queued Gmail operation: {error}");
         }
@@ -1691,15 +1922,24 @@ pub async fn cancel_mail_operations(
     cancel_pending_mail_operations(pool.inner(), &thread_ids).await
 }
 
-async fn cancel_pending_mail_operations(pool: &SqlitePool, thread_ids: &[String]) -> Result<usize, String> {
-    if thread_ids.is_empty() { return Ok(0); }
+async fn cancel_pending_mail_operations(
+    pool: &SqlitePool,
+    thread_ids: &[String],
+) -> Result<usize, String> {
+    if thread_ids.is_empty() {
+        return Ok(0);
+    }
     let placeholders = std::iter::repeat("?")
         .take(thread_ids.len())
         .collect::<Vec<_>>()
         .join(",");
-    let query = format!("DELETE FROM mail_operations WHERE status = 'pending' AND thread_id IN ({placeholders})");
+    let query = format!(
+        "DELETE FROM mail_operations WHERE status = 'pending' AND thread_id IN ({placeholders})"
+    );
     let mut request = sqlx::query(&query);
-    for thread_id in thread_ids { request = request.bind(thread_id); }
+    for thread_id in thread_ids {
+        request = request.bind(thread_id);
+    }
     let result = request.execute(pool).await.map_err(|e| e.to_string())?;
     Ok(result.rows_affected() as usize)
 }
@@ -1766,7 +2006,11 @@ fn html_visible_content_score(html: &str) -> usize {
                 '>' => *inside_tag = false,
                 _ => {}
             }
-            Some(if *inside_tag || matches!(c, '<' | '>') { ' ' } else { c })
+            Some(if *inside_tag || matches!(c, '<' | '>') {
+                ' '
+            } else {
+                c
+            })
         })
         .filter(|c| !c.is_whitespace() && *c != '\u{00a0}')
         .collect();
@@ -1783,11 +2027,17 @@ fn remove_html_blocks(html: &str, tag: &str) -> String {
     while let Some(relative_start) = lower[cursor..].find(&open) {
         let start = cursor + relative_start;
         result.push_str(&html[cursor..start]);
-        let Some(open_end_relative) = lower[start..].find('>') else { break; };
+        let Some(open_end_relative) = lower[start..].find('>') else {
+            break;
+        };
         let after_open = start + open_end_relative + 1;
-        let Some(close_relative) = lower[after_open..].find(&close) else { break; };
+        let Some(close_relative) = lower[after_open..].find(&close) else {
+            break;
+        };
         let close_start = after_open + close_relative;
-        let Some(close_end_relative) = lower[close_start..].find('>') else { break; };
+        let Some(close_end_relative) = lower[close_start..].find('>') else {
+            break;
+        };
         cursor = close_start + close_end_relative + 1;
     }
     result.push_str(&html[cursor..]);
@@ -1817,27 +2067,56 @@ fn header_parameter(value: &str, name: &str) -> Option<String> {
 }
 
 fn attachment_filename(mail: &mailparse::ParsedMail) -> Option<String> {
-    let disposition = mail.headers.get_first_value("Content-Disposition").unwrap_or_default();
-    let content_type = mail.headers.get_first_value("Content-Type").unwrap_or_default();
+    let disposition = mail
+        .headers
+        .get_first_value("Content-Disposition")
+        .unwrap_or_default();
+    let content_type = mail
+        .headers
+        .get_first_value("Content-Type")
+        .unwrap_or_default();
     header_parameter(&disposition, "filename")
         .or_else(|| header_parameter(&content_type, "name"))
         .filter(|filename| !filename.trim().is_empty())
 }
 
-fn collect_attachment_metadata(mail: &mailparse::ParsedMail, path: &str, attachments: &mut Vec<AttachmentMeta>) {
+fn collect_attachment_metadata(
+    mail: &mailparse::ParsedMail,
+    path: &str,
+    attachments: &mut Vec<AttachmentMeta>,
+) {
     if !mail.subparts.is_empty() {
         for (index, part) in mail.subparts.iter().enumerate() {
-            let part_path = if path.is_empty() { (index + 1).to_string() } else { format!("{path}.{}", index + 1) };
+            let part_path = if path.is_empty() {
+                (index + 1).to_string()
+            } else {
+                format!("{path}.{}", index + 1)
+            };
             collect_attachment_metadata(part, &part_path, attachments);
         }
         return;
     }
-    let disposition = mail.headers.get_first_value("Content-Disposition").unwrap_or_default().to_lowercase();
-    let Some(filename) = attachment_filename(mail) else { return; };
-    if !disposition.contains("attachment") && !mail.ctype.mimetype.to_lowercase().starts_with("application/") {
+    let disposition = mail
+        .headers
+        .get_first_value("Content-Disposition")
+        .unwrap_or_default()
+        .to_lowercase();
+    let Some(filename) = attachment_filename(mail) else {
+        return;
+    };
+    if !disposition.contains("attachment")
+        && !mail
+            .ctype
+            .mimetype
+            .to_lowercase()
+            .starts_with("application/")
+    {
         return;
     }
-    let size_bytes = mail.get_body_raw().map(|body| body.len() as i64).unwrap_or(0);
+    let size_bytes = mail
+        .get_body_raw()
+        .map(|body| body.len() as i64)
+        .unwrap_or(0);
     attachments.push(AttachmentMeta {
         part_path: path.to_string(),
         filename,
@@ -1852,7 +2131,11 @@ fn extract_attachment_metadata(mail: &mailparse::ParsedMail) -> Vec<AttachmentMe
     attachments
 }
 
-async fn store_attachment_metadata(pool: &SqlitePool, message_id: &str, attachments: &[AttachmentMeta]) -> Result<(), String> {
+async fn store_attachment_metadata(
+    pool: &SqlitePool,
+    message_id: &str,
+    attachments: &[AttachmentMeta],
+) -> Result<(), String> {
     let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM message_attachments WHERE message_id = ?")
         .bind(message_id)
@@ -1914,7 +2197,13 @@ fn collect_body_parts(
 ) {
     if !mail.subparts.is_empty() {
         for part in &mail.subparts {
-            collect_body_parts(part, html_candidates, text_candidates, has_attachments, inline_images);
+            collect_body_parts(
+                part,
+                html_candidates,
+                text_candidates,
+                has_attachments,
+                inline_images,
+            );
         }
         return;
     }
@@ -1964,7 +2253,10 @@ fn collect_body_parts(
         || looks_like_html(&body);
     if is_standard_html || is_supported_rich_html {
         if html_visible_content_score(&body) > 0 {
-            html_candidates.push(HtmlCandidate { body, is_standard_html });
+            html_candidates.push(HtmlCandidate {
+                body,
+                is_standard_html,
+            });
         }
     } else if ct == "text/plain" && !body.trim().is_empty() {
         text_candidates.push(body);
@@ -1991,11 +2283,17 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
         .iter()
         .filter(|candidate| candidate.is_standard_html)
         .max_by_key(|candidate| html_visible_content_score(&candidate.body))
-        .or_else(|| html_candidates.iter().max_by_key(|candidate| html_visible_content_score(&candidate.body)))
+        .or_else(|| {
+            html_candidates
+                .iter()
+                .max_by_key(|candidate| html_visible_content_score(&candidate.body))
+        })
         .map(|candidate| {
-            inline_images.iter().fold(candidate.body.clone(), |html, (content_id, data_url)| {
-                html.replace(&format!("cid:{content_id}"), data_url)
-            })
+            inline_images
+                .iter()
+                .fold(candidate.body.clone(), |html, (content_id, data_url)| {
+                    html.replace(&format!("cid:{content_id}"), data_url)
+                })
         });
 
     let text = text_candidates
@@ -2004,14 +2302,22 @@ fn extract_body_parts(mail: &mailparse::ParsedMail) -> (Option<String>, Option<S
         // Some recruiting systems send HTML only. Keep a derived text version
         // as a durable fallback if a particular sender's rich markup cannot be
         // rendered by the local WebView.
-        .or_else(|| html.as_ref().map(|body| html2text::from_read(body.as_bytes(), 100)));
+        .or_else(|| {
+            html.as_ref()
+                .map(|body| html2text::from_read(body.as_bytes(), 100))
+        });
 
     (html, text, has_attachments)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_pending_mail_operations, deliver_or_confirm_mail_operation, dispatch_mail_delivery, enqueue_mail_flag_operation, enqueue_mail_operation, html_visible_content_score, recover_interrupted_mail_operations, settle_mail_operation_result, MailDelivery, MailDeliveryAction, MailOperation};
+    use super::{
+        cancel_pending_mail_operations, deliver_or_confirm_mail_operation, dispatch_mail_delivery,
+        enqueue_mail_flag_operation, enqueue_mail_operation, html_visible_content_score,
+        recover_interrupted_mail_operations, settle_mail_operation_result, MailDelivery,
+        MailDeliveryAction, MailOperation,
+    };
     use crate::commands::test_support::TestDatabase;
     use std::{future::Future, pin::Pin, sync::Mutex};
 
@@ -2023,14 +2329,24 @@ mod tests {
     }
 
     impl MailDelivery for FakeMailDelivery {
-        fn deliver<'a>(&'a self, thread_id: &'a str, action: MailDeliveryAction) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        fn deliver<'a>(
+            &'a self,
+            thread_id: &'a str,
+            action: MailDeliveryAction,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
-                self.deliveries.lock().unwrap().push((thread_id.to_string(), action));
+                self.deliveries
+                    .lock()
+                    .unwrap()
+                    .push((thread_id.to_string(), action));
                 Ok(())
             })
         }
 
-        fn thread_is_in_trash<'a>(&'a self, _thread_id: &'a str) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        fn thread_is_in_trash<'a>(
+            &'a self,
+            _thread_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
             Box::pin(async move {
                 *self.trash_checks.lock().unwrap() += 1;
                 Ok(self.in_trash)
@@ -2047,7 +2363,10 @@ mod tests {
 
     #[test]
     fn empty_html_shell_is_not_meaningful() {
-        assert_eq!(html_visible_content_score("<html><head><style></style></head><body></body></html>"), 0);
+        assert_eq!(
+            html_visible_content_score("<html><head><style></style></head><body></body></html>"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2056,11 +2375,27 @@ mod tests {
         db.seed_thread("thread-archive").await;
         db.seed_active_follow_up("thread-archive").await;
 
-        enqueue_mail_operation(&db.pool, "thread-archive", "archive").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-archive", "archive")
+            .await
+            .unwrap();
 
-        let operation: String = sqlx::query_scalar("SELECT operation FROM mail_operations WHERE thread_id = 'thread-archive'").fetch_one(&db.pool).await.unwrap();
-        let flag_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-archive'").fetch_one(&db.pool).await.unwrap();
-        let follow_up: String = sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-archive'").fetch_one(&db.pool).await.unwrap();
+        let operation: String = sqlx::query_scalar(
+            "SELECT operation FROM mail_operations WHERE thread_id = 'thread-archive'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let flag_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-archive'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let follow_up: String =
+            sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-archive'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         assert_eq!(operation, "archive");
         assert_eq!(flag_count, 0);
         assert_eq!(follow_up, "completed");
@@ -2073,11 +2408,27 @@ mod tests {
         db.seed_thread("thread-delete").await;
         db.seed_active_follow_up("thread-delete").await;
 
-        enqueue_mail_operation(&db.pool, "thread-delete", "trash").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-delete", "trash")
+            .await
+            .unwrap();
 
-        let operation: String = sqlx::query_scalar("SELECT operation FROM mail_operations WHERE thread_id = 'thread-delete'").fetch_one(&db.pool).await.unwrap();
-        let flag_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-delete'").fetch_one(&db.pool).await.unwrap();
-        let follow_up: String = sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-delete'").fetch_one(&db.pool).await.unwrap();
+        let operation: String = sqlx::query_scalar(
+            "SELECT operation FROM mail_operations WHERE thread_id = 'thread-delete'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let flag_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-delete'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let follow_up: String =
+            sqlx::query_scalar("SELECT status FROM follow_ups WHERE thread_id = 'thread-delete'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         assert_eq!(operation, "trash");
         assert_eq!(flag_count, 0);
         assert_eq!(follow_up, "completed");
@@ -2090,20 +2441,36 @@ mod tests {
         db.seed_thread("thread-confirmed-trash").await;
         db.seed_thread("thread-confirmed-archive").await;
 
-        enqueue_mail_operation(&db.pool, "thread-confirmed-trash", "trash").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-confirmed-trash", "trash")
+            .await
+            .unwrap();
         let trash: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-confirmed-trash'")
             .fetch_one(&db.pool).await.unwrap();
-        settle_mail_operation_result(&db.pool, &trash, Ok(())).await.unwrap();
+        settle_mail_operation_result(&db.pool, &trash, Ok(()))
+            .await
+            .unwrap();
 
-        enqueue_mail_operation(&db.pool, "thread-confirmed-archive", "archive").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-confirmed-archive", "archive")
+            .await
+            .unwrap();
         let archive: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-confirmed-archive'")
             .fetch_one(&db.pool).await.unwrap();
-        settle_mail_operation_result(&db.pool, &archive, Ok(())).await.unwrap();
+        settle_mail_operation_result(&db.pool, &archive, Ok(()))
+            .await
+            .unwrap();
 
-        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-trash'")
-            .fetch_one(&db.pool).await.unwrap();
-        let archived_trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-archive'")
-            .fetch_one(&db.pool).await.unwrap();
+        let trashed_at: Option<String> = sqlx::query_scalar(
+            "SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-trash'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let archived_trashed_at: Option<String> = sqlx::query_scalar(
+            "SELECT trashed_at FROM threads WHERE id = 'thread-confirmed-archive'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert!(trashed_at.is_some());
         assert_eq!(archived_trashed_at, None);
         db.close().await;
@@ -2113,23 +2480,44 @@ mod tests {
     async fn interrupted_trash_is_recovered_by_reconciling_before_replay() {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-uncertain-trash").await;
-        enqueue_mail_operation(&db.pool, "thread-uncertain-trash", "trash").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-uncertain-trash", "trash")
+            .await
+            .unwrap();
         let mut item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-uncertain-trash'")
             .fetch_one(&db.pool).await.unwrap();
         item.remote_attempted_at = Some("2026-10-04T00:00:00+00:00".to_string());
 
         // Models a server-side MOVE that succeeded just before the laptop
         // lost its connection and therefore never received the IMAP response.
-        let delivery = FakeMailDelivery { deliveries: Mutex::new(Vec::new()), in_trash: true, trash_checks: Mutex::new(0) };
-        deliver_or_confirm_mail_operation(&delivery, &item).await.unwrap();
-        settle_mail_operation_result(&db.pool, &item, Ok(())).await.unwrap();
+        let delivery = FakeMailDelivery {
+            deliveries: Mutex::new(Vec::new()),
+            in_trash: true,
+            trash_checks: Mutex::new(0),
+        };
+        deliver_or_confirm_mail_operation(&delivery, &item)
+            .await
+            .unwrap();
+        settle_mail_operation_result(&db.pool, &item, Ok(()))
+            .await
+            .unwrap();
 
-        assert!(delivery.deliveries.lock().unwrap().is_empty(), "must not replay a confirmed Trash move");
+        assert!(
+            delivery.deliveries.lock().unwrap().is_empty(),
+            "must not replay a confirmed Trash move"
+        );
         assert_eq!(*delivery.trash_checks.lock().unwrap(), 1);
-        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-uncertain-trash'")
-            .fetch_one(&db.pool).await.unwrap();
-        let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-uncertain-trash'")
-            .fetch_one(&db.pool).await.unwrap();
+        let trashed_at: Option<String> = sqlx::query_scalar(
+            "SELECT trashed_at FROM threads WHERE id = 'thread-uncertain-trash'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let operations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-uncertain-trash'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert!(trashed_at.is_some());
         assert_eq!(operations, 0);
         db.close().await;
@@ -2138,28 +2526,51 @@ mod tests {
     #[tokio::test]
     async fn fresh_trash_delivery_does_not_do_an_extra_reconciliation_round_trip() {
         let item = MailOperation {
-            id: "operation-fresh".to_string(), thread_id: "thread-fresh".to_string(),
-            operation: "trash".to_string(), attempt_count: 0, remote_attempted_at: None,
+            id: "operation-fresh".to_string(),
+            thread_id: "thread-fresh".to_string(),
+            operation: "trash".to_string(),
+            attempt_count: 0,
+            remote_attempted_at: None,
         };
-        let delivery = FakeMailDelivery { deliveries: Mutex::new(Vec::new()), in_trash: false, trash_checks: Mutex::new(0) };
-        deliver_or_confirm_mail_operation(&delivery, &item).await.unwrap();
+        let delivery = FakeMailDelivery {
+            deliveries: Mutex::new(Vec::new()),
+            in_trash: false,
+            trash_checks: Mutex::new(0),
+        };
+        deliver_or_confirm_mail_operation(&delivery, &item)
+            .await
+            .unwrap();
         assert_eq!(*delivery.trash_checks.lock().unwrap(), 0);
-        assert_eq!(*delivery.deliveries.lock().unwrap(), vec![("thread-fresh".to_string(), MailDeliveryAction::Trash)]);
+        assert_eq!(
+            *delivery.deliveries.lock().unwrap(),
+            vec![("thread-fresh".to_string(), MailDeliveryAction::Trash)]
+        );
     }
 
     #[tokio::test]
     async fn failed_or_interrupted_trash_never_marks_local_deletion_confirmed() {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-trash-failure").await;
-        enqueue_mail_operation(&db.pool, "thread-trash-failure", "trash").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-trash-failure", "trash")
+            .await
+            .unwrap();
         let item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-trash-failure'")
             .fetch_one(&db.pool).await.unwrap();
-        settle_mail_operation_result(&db.pool, &item, Err("connection lost".to_string())).await.unwrap();
+        settle_mail_operation_result(&db.pool, &item, Err("connection lost".to_string()))
+            .await
+            .unwrap();
 
-        let trashed_at: Option<String> = sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-trash-failure'")
-            .fetch_one(&db.pool).await.unwrap();
-        let state: String = sqlx::query_scalar("SELECT status FROM mail_operations WHERE thread_id = 'thread-trash-failure'")
-            .fetch_one(&db.pool).await.unwrap();
+        let trashed_at: Option<String> =
+            sqlx::query_scalar("SELECT trashed_at FROM threads WHERE id = 'thread-trash-failure'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT status FROM mail_operations WHERE thread_id = 'thread-trash-failure'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert_eq!(trashed_at, None);
         assert_eq!(state, "pending");
         db.close().await;
@@ -2169,13 +2580,21 @@ mod tests {
     async fn restart_returns_in_progress_delivery_to_reconciliation_queue() {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-restart-trash").await;
-        enqueue_mail_operation(&db.pool, "thread-restart-trash", "trash").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-restart-trash", "trash")
+            .await
+            .unwrap();
         sqlx::query("UPDATE mail_operations SET status = 'in_progress' WHERE thread_id = 'thread-restart-trash'")
             .execute(&db.pool).await.unwrap();
 
-        recover_interrupted_mail_operations(&db.pool, "2026-10-04T00:00:00+00:00").await.unwrap();
-        let state: String = sqlx::query_scalar("SELECT status FROM mail_operations WHERE thread_id = 'thread-restart-trash'")
-            .fetch_one(&db.pool).await.unwrap();
+        recover_interrupted_mail_operations(&db.pool, "2026-10-04T00:00:00+00:00")
+            .await
+            .unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT status FROM mail_operations WHERE thread_id = 'thread-restart-trash'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert_eq!(state, "pending");
         db.close().await;
     }
@@ -2185,10 +2604,22 @@ mod tests {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-flag").await;
 
-        enqueue_mail_flag_operation(&db.pool, "thread-flag", Some(true), None).await.unwrap();
+        enqueue_mail_flag_operation(&db.pool, "thread-flag", Some(true), None)
+            .await
+            .unwrap();
 
-        let operation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-flag'").fetch_one(&db.pool).await.unwrap();
-        let seen: i64 = sqlx::query_scalar("SELECT seen FROM mail_flag_operations WHERE thread_id = 'thread-flag'").fetch_one(&db.pool).await.unwrap();
+        let operation_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-flag'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let seen: i64 = sqlx::query_scalar(
+            "SELECT seen FROM mail_flag_operations WHERE thread_id = 'thread-flag'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert_eq!(operation_count, 0);
         assert_eq!(seen, 1);
         db.close().await;
@@ -2199,10 +2630,19 @@ mod tests {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-coalesce").await;
 
-        enqueue_mail_flag_operation(&db.pool, "thread-coalesce", Some(true), None).await.unwrap();
-        enqueue_mail_flag_operation(&db.pool, "thread-coalesce", None, Some(true)).await.unwrap();
+        enqueue_mail_flag_operation(&db.pool, "thread-coalesce", Some(true), None)
+            .await
+            .unwrap();
+        enqueue_mail_flag_operation(&db.pool, "thread-coalesce", None, Some(true))
+            .await
+            .unwrap();
 
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-coalesce'").fetch_one(&db.pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_flag_operations WHERE thread_id = 'thread-coalesce'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         let state: (i64, i64, i64) = sqlx::query_as("SELECT seen, starred, revision FROM mail_flag_operations WHERE thread_id = 'thread-coalesce'").fetch_one(&db.pool).await.unwrap();
         assert_eq!(count, 1);
         assert_eq!(state, (1, 1, 2));
@@ -2213,10 +2653,19 @@ mod tests {
     async fn undo_removes_only_pending_mail_operations() {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-undo").await;
-        enqueue_mail_operation(&db.pool, "thread-undo", "archive").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-undo", "archive")
+            .await
+            .unwrap();
 
-        let removed = cancel_pending_mail_operations(&db.pool, &["thread-undo".to_string()]).await.unwrap();
-        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-undo'").fetch_one(&db.pool).await.unwrap();
+        let removed = cancel_pending_mail_operations(&db.pool, &["thread-undo".to_string()])
+            .await
+            .unwrap();
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_operations WHERE thread_id = 'thread-undo'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(remaining, 0);
         db.close().await;
@@ -2226,11 +2675,15 @@ mod tests {
     async fn failed_delivery_retries_then_surfaces_a_terminal_failure() {
         let db = TestDatabase::new().await;
         db.seed_thread("thread-retry").await;
-        enqueue_mail_operation(&db.pool, "thread-retry", "archive").await.unwrap();
+        enqueue_mail_operation(&db.pool, "thread-retry", "archive")
+            .await
+            .unwrap();
 
         for attempt in 1..=3 {
             let item: MailOperation = sqlx::query_as("SELECT id, thread_id, operation, attempt_count, remote_attempted_at FROM mail_operations WHERE thread_id = 'thread-retry'").fetch_one(&db.pool).await.unwrap();
-            let failure = settle_mail_operation_result(&db.pool, &item, Err("offline".to_string())).await.unwrap();
+            let failure = settle_mail_operation_result(&db.pool, &item, Err("offline".to_string()))
+                .await
+                .unwrap();
             let state: (String, i64) = sqlx::query_as("SELECT status, attempt_count FROM mail_operations WHERE thread_id = 'thread-retry'").fetch_one(&db.pool).await.unwrap();
             if attempt < 3 {
                 assert_eq!(state, ("pending".to_string(), attempt));
@@ -2246,8 +2699,17 @@ mod tests {
     #[tokio::test]
     async fn queued_archive_dispatches_to_fake_delivery_without_imap() {
         let delivery = FakeMailDelivery::default();
-        let item = MailOperation { id: "operation-1".to_string(), thread_id: "thread-remote".to_string(), operation: "archive".to_string(), attempt_count: 0, remote_attempted_at: None };
+        let item = MailOperation {
+            id: "operation-1".to_string(),
+            thread_id: "thread-remote".to_string(),
+            operation: "archive".to_string(),
+            attempt_count: 0,
+            remote_attempted_at: None,
+        };
         dispatch_mail_delivery(&delivery, &item).await.unwrap();
-        assert_eq!(*delivery.deliveries.lock().unwrap(), vec![("thread-remote".to_string(), MailDeliveryAction::Archive)]);
+        assert_eq!(
+            *delivery.deliveries.lock().unwrap(),
+            vec![("thread-remote".to_string(), MailDeliveryAction::Archive)]
+        );
     }
 }

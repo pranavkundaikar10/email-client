@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 
@@ -938,37 +938,34 @@ pub async fn analyze_inbox(
     Ok(results)
 }
 
-/// Return recent inbox messages that have not yet been analyzed. The worker
-/// takes one at a time so local inference never competes with the UI or starts
-/// multiple Ollama requests concurrently.
+/// Return unresolved inbox messages that have not yet been analyzed. The
+/// worker takes one at a time so local inference never competes with the UI
+/// or starts multiple Ollama requests concurrently.
 #[tauri::command]
 pub async fn get_auto_analysis_candidates(
     pool: tauri::State<'_, SqlitePool>,
     limit: Option<i64>,
 ) -> Result<Vec<AutoAnalysisCandidate>, String> {
-    background_analysis_candidates(pool.inner(), limit.unwrap_or(1), Utc::now()).await
+    background_analysis_candidates(
+        pool.inner(),
+        limit.unwrap_or(1),
+        Utc::now() - chrono::Duration::days(7),
+    )
+    .await
 }
 
-/// Candidate selection for the low-impact background worker. This is kept
-/// separate from the Tauri command so the eventual worker and its tests use
-/// the exact same account-independent eligibility rules.
+/// Candidate selection for the low-impact background worker. Unresolved active
+/// inbox threads in the rolling recent-mail window are eligible. Durable jobs
+/// and the small caller-provided limit bound each worker wake-up.
 pub(crate) async fn background_analysis_candidates(
     pool: &SqlitePool,
     limit: i64,
-    now: DateTime<Utc>,
+    oldest_eligible_at: DateTime<Utc>,
 ) -> Result<Vec<AutoAnalysisCandidate>, String> {
     if !configured_ai_assistance(pool).await?.enabled {
         return Ok(Vec::new());
     }
     let limit = limit.clamp(1, 5);
-    let today_start = now
-        .with_timezone(&chrono::Local)
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
-        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
-
     sqlx::query_as::<_, AutoAnalysisCandidate>(
         r#"
         SELECT t.id AS thread_id, m.id AS message_id, t.last_message_at AS message_received_at
@@ -976,8 +973,10 @@ pub(crate) async fn background_analysis_candidates(
         JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN email_reviews r ON r.thread_id = t.id
         LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
+          AND r.thread_id IS NULL
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND t.last_message_at >= ?
           AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
@@ -986,7 +985,7 @@ pub(crate) async fn background_analysis_candidates(
         LIMIT ?
         "#,
     )
-    .bind(today_start)
+    .bind(oldest_eligible_at.to_rfc3339())
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -994,7 +993,7 @@ pub(crate) async fn background_analysis_candidates(
 }
 
 /// Newest unreviewed messages for an explicit historical-review batch. Unlike
-/// automatic triage, this intentionally has no received-today cutoff. It is
+/// automatic triage, this intentionally has no recent-mail cutoff. It is
 /// account-scoped so one account can never enqueue another account's mail.
 pub(crate) async fn backlog_analysis_candidates(
     pool: &SqlitePool,
@@ -1053,7 +1052,7 @@ pub(crate) async fn enqueue_backlog_triage_candidates(
         let received_at = DateTime::parse_from_rfc3339(&candidate.message_received_at)
             .map_err(|_| "backlog candidate has an invalid received timestamp".to_string())?
             .with_timezone(&Utc);
-        crate::commands::triage_worker::enqueue_triage_job(
+        crate::commands::triage_worker::enqueue_manual_triage_job(
             pool,
             &candidate.thread_id,
             &candidate.message_id,
@@ -1130,43 +1129,36 @@ pub(crate) async fn background_triage_enabled(pool: &SqlitePool) -> Result<bool,
     Ok(configured_ai_assistance(pool).await?.enabled)
 }
 
-/// Count all currently waiting background work: unqueued received-today mail
-/// plus durable jobs from user-requested historical batches. The Review UI
-/// uses this to distinguish an empty queue from one still being prepared.
+/// Count currently waiting work: automatic jobs in the recent-mail window and
+/// any user-requested historical batch. The Review UI uses this to distinguish
+/// an empty queue from one still being prepared.
 #[tauri::command]
 pub async fn get_auto_analysis_pending_count(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<i64, String> {
-    background_analysis_pending_count(pool.inner(), Utc::now()).await
+    background_analysis_pending_count(pool.inner(), Utc::now() - chrono::Duration::days(7)).await
 }
 
 async fn background_analysis_pending_count(
     pool: &SqlitePool,
-    now: DateTime<Utc>,
+    oldest_eligible_at: DateTime<Utc>,
 ) -> Result<i64, String> {
     if !configured_ai_assistance(pool).await?.enabled {
         return Ok(0);
     }
-    let today_start = now
-        .with_timezone(&chrono::Local)
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
-        .map(|time| time.with_timezone(&chrono::Utc).to_rfc3339())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive().to_string() + "T00:00:00+00:00");
-
-    // Count both unqueued current-mail candidates and durable worker jobs.
-    // Historical batches are represented only by jobs, so limiting this to
-    // today's discovery query incorrectly made Review look caught up while a
-    // user-requested backlog was still being processed.
+    // Count both unqueued inbox threads and durable jobs. Failed jobs are not
+    // counted here because Review exposes them separately for explicit retry
+    // or manual handling.
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*) FROM (
           SELECT t.id AS thread_id
           FROM threads t
           LEFT JOIN email_analysis a ON a.thread_id = t.id
+          LEFT JOIN email_reviews r ON r.thread_id = t.id
           LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
           WHERE t.folder = 'inbox' AND t.archived = 0
+            AND r.thread_id IS NULL
             AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
             AND t.last_message_at >= ?
             AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
@@ -1177,13 +1169,17 @@ async fn background_analysis_pending_count(
           SELECT j.thread_id
           FROM background_triage_jobs j
           JOIN threads t ON t.id = j.thread_id
+          LEFT JOIN email_reviews r ON r.thread_id = t.id
           WHERE j.status IN ('pending', 'leased')
             AND t.folder = 'inbox' AND t.archived = 0
+            AND r.thread_id IS NULL
+            AND (j.source = 'manual' OR t.last_message_at >= ?)
             AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
         )
         "#,
     )
-    .bind(today_start)
+    .bind(oldest_eligible_at.to_rfc3339())
+    .bind(oldest_eligible_at.to_rfc3339())
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1492,7 +1488,7 @@ mod action_contract_tests {
     }
 
     #[tokio::test]
-    async fn background_candidates_are_recent_stale_inbox_threads_in_newest_first_order() {
+    async fn background_candidates_catch_up_older_unreviewed_inbox_threads_in_newest_first_order() {
         let db = TestDatabase::new().await;
         let now = Utc::now();
         let newest = (now - Duration::seconds(10)).to_rfc3339();
@@ -1500,6 +1496,7 @@ mod action_contract_tests {
         let analyzed = (now - Duration::seconds(30)).to_rfc3339();
         let queued = (now - Duration::seconds(40)).to_rfc3339();
         let old = (now - Duration::days(1)).to_rfc3339();
+        let reviewed = (now - Duration::days(2)).to_rfc3339();
 
         for (thread_id, message_id, timestamp) in [
             ("thread-newest", "message-newest", newest.as_str()),
@@ -1507,6 +1504,7 @@ mod action_contract_tests {
             ("thread-analyzed", "message-analyzed", analyzed.as_str()),
             ("thread-queued", "message-queued", queued.as_str()),
             ("thread-old", "message-old", old.as_str()),
+            ("thread-reviewed", "message-reviewed", reviewed.as_str()),
         ] {
             db.seed_thread(thread_id).await;
             sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
@@ -1535,11 +1533,14 @@ mod action_contract_tests {
             .execute(&db.pool)
             .await
             .unwrap();
-
-        let candidates = background_analysis_candidates(&db.pool, 2, now)
+        save_review_decision(&db.pool, "thread-reviewed", "keep")
             .await
             .unwrap();
-        let pending_count = background_analysis_pending_count(&db.pool, now)
+
+        let candidates = background_analysis_candidates(&db.pool, 5, now - Duration::days(7))
+            .await
+            .unwrap();
+        let pending_count = background_analysis_pending_count(&db.pool, now - Duration::days(7))
             .await
             .unwrap();
 
@@ -1548,9 +1549,63 @@ mod action_contract_tests {
                 .iter()
                 .map(|candidate| candidate.thread_id.as_str())
                 .collect::<Vec<_>>(),
-            ["thread-newest", "thread-next"],
+            ["thread-newest", "thread-next", "thread-old"],
         );
-        assert_eq!(pending_count, 2);
+        assert_eq!(pending_count, 3);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn automatic_catch_up_is_limited_to_recent_mail_but_manual_batches_remain_visible() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        let cutoff = now - Duration::days(7);
+        for (thread_id, message_id, timestamp) in [
+            ("recent", "recent-message", now.to_rfc3339()),
+            (
+                "older",
+                "older-message",
+                (now - Duration::days(8)).to_rfc3339(),
+            ),
+        ] {
+            db.seed_thread(thread_id).await;
+            sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
+                .bind(&timestamp)
+                .bind(thread_id)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            db.seed_message_for_thread(message_id, thread_id, &timestamp)
+                .await;
+        }
+
+        let automatic = background_analysis_candidates(&db.pool, 5, cutoff)
+            .await
+            .unwrap();
+        assert_eq!(
+            automatic
+                .iter()
+                .map(|candidate| candidate.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["recent"]
+        );
+
+        crate::commands::triage_worker::enqueue_manual_triage_job(
+            &db.pool,
+            "older",
+            "older-message",
+            now - Duration::days(8),
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            background_analysis_pending_count(&db.pool, cutoff)
+                .await
+                .unwrap(),
+            2,
+            "the automatic recent item and the explicit old batch are both visible"
+        );
         db.close().await;
     }
 
@@ -1572,12 +1627,14 @@ mod action_contract_tests {
             .await
             .unwrap();
 
-        assert!(background_analysis_candidates(&db.pool, 1, now)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            background_analysis_candidates(&db.pool, 1, now - Duration::days(7))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            background_analysis_pending_count(&db.pool, now)
+            background_analysis_pending_count(&db.pool, now - Duration::days(7))
                 .await
                 .unwrap(),
             0
@@ -1756,7 +1813,7 @@ mod action_contract_tests {
             &received_at.to_rfc3339(),
         )
         .await;
-        crate::commands::triage_worker::enqueue_triage_job(
+        crate::commands::triage_worker::enqueue_manual_triage_job(
             &db.pool,
             "historical-pending",
             "historical-pending-message",
@@ -1767,7 +1824,7 @@ mod action_contract_tests {
         .unwrap();
 
         assert_eq!(
-            background_analysis_pending_count(&db.pool, now)
+            background_analysis_pending_count(&db.pool, now - Duration::days(7))
                 .await
                 .unwrap(),
             1

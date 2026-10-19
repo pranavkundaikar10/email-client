@@ -67,7 +67,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <div>
             <h2 className="text-sm font-semibold text-gray-900">Review queue</h2>
-            <p className="mt-0.5 text-xs text-gray-400">Today’s analyzed inbox emails · you choose every action</p>
+            <p className="mt-0.5 text-xs text-gray-400">Analyzed inbox emails · you choose every action</p>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
         </div>
@@ -78,7 +78,7 @@ export default function ReviewQueue({ onClose }: { onClose: () => void }) {
               <div className="py-12 text-center">
                 <Check size={22} className="mx-auto text-emerald-500" />
                 <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
-                <p className="mt-1 text-xs text-gray-400">New analyzed emails from today will appear here.</p>
+                <p className="mt-1 text-xs text-gray-400">New analyzed emails will appear here automatically.</p>
               </div>
             ) : (
               <>

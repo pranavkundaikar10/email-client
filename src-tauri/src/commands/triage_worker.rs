@@ -49,13 +49,53 @@ pub async fn enqueue_triage_job(
     message_received_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
+    enqueue_triage_job_with_source(
+        pool,
+        thread_id,
+        message_id,
+        message_received_at,
+        now,
+        "automatic",
+    )
+    .await
+}
+
+/// Persist an older batch explicitly requested by the user. Unlike automatic
+/// catch-up work, manual jobs are not constrained by the rolling recent-mail
+/// window.
+pub async fn enqueue_manual_triage_job(
+    pool: &SqlitePool,
+    thread_id: &str,
+    message_id: &str,
+    message_received_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    enqueue_triage_job_with_source(
+        pool,
+        thread_id,
+        message_id,
+        message_received_at,
+        now,
+        "manual",
+    )
+    .await
+}
+
+async fn enqueue_triage_job_with_source(
+    pool: &SqlitePool,
+    thread_id: &str,
+    message_id: &str,
+    message_received_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    source: &str,
+) -> Result<(), String> {
     let now = now.to_rfc3339();
     sqlx::query(
         r#"
         INSERT INTO background_triage_jobs
             (thread_id, message_id, message_received_at, status, attempt_count,
-             next_attempt_at, created_at, updated_at)
-        VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+             next_attempt_at, created_at, updated_at, source)
+        VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)
         ON CONFLICT(thread_id) DO UPDATE SET
             message_id = excluded.message_id,
             message_received_at = excluded.message_received_at,
@@ -64,6 +104,7 @@ pub async fn enqueue_triage_job(
             next_attempt_at = excluded.next_attempt_at,
             lease_expires_at = NULL,
             last_error = NULL,
+            source = excluded.source,
             updated_at = excluded.updated_at
         WHERE background_triage_jobs.status = 'pending'
           AND background_triage_jobs.message_id != excluded.message_id
@@ -75,10 +116,29 @@ pub async fn enqueue_triage_job(
     .bind(&now)
     .bind(&now)
     .bind(&now)
+    .bind(source)
     .execute(pool)
     .await
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Drops automatic work outside the rolling catch-up window before it starts.
+/// A currently leased job is deliberately left alone so an in-flight read-only
+/// analysis can finish safely. Manual historical batches remain untouched.
+pub async fn remove_stale_automatic_triage_jobs(
+    pool: &SqlitePool,
+    oldest_eligible_at: DateTime<Utc>,
+) -> Result<u64, String> {
+    let result = sqlx::query(
+        "DELETE FROM background_triage_jobs \
+         WHERE status = 'pending' AND source = 'automatic' AND message_received_at < ?",
+    )
+    .bind(oldest_eligible_at.to_rfc3339())
+    .execute(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(result.rows_affected())
 }
 
 /// Atomically takes one ready job. SQLite serializes this short transaction,
@@ -278,7 +338,7 @@ impl TriageExecutor for LiveTriageExecutor {
     }
 }
 
-/// Discovers a small bounded set of today’s eligible mail, persists it, then
+/// Discovers a small bounded set of unresolved recent inbox mail, persists it, then
 /// processes at most one item. Calling it repeatedly is safe: the lease and
 /// upsert rules preserve retries and prevent duplicate local-model calls.
 pub async fn run_one_background_triage(
@@ -289,7 +349,11 @@ pub async fn run_one_background_triage(
         return Ok(ProcessOneResult::Idle);
     }
     let now = Utc::now();
-    for candidate in crate::commands::agent::background_analysis_candidates(pool, 5, now).await? {
+    let oldest_eligible_at = now - Duration::days(7);
+    remove_stale_automatic_triage_jobs(pool, oldest_eligible_at).await?;
+    for candidate in
+        crate::commands::agent::background_analysis_candidates(pool, 5, oldest_eligible_at).await?
+    {
         let received_at = DateTime::parse_from_rfc3339(&candidate.message_received_at)
             .map_err(|_| "background candidate has an invalid received timestamp".to_string())?
             .with_timezone(&Utc);
@@ -314,8 +378,9 @@ async fn process_background_triage_loop(
     pool: &SqlitePool,
     worker: &BackgroundTriageWorker,
 ) -> Result<(), String> {
+    const MAX_JOBS_PER_WAKE: usize = 5;
     let _guard = worker.lock.lock().await;
-    loop {
+    for _ in 0..MAX_JOBS_PER_WAKE {
         match run_one_background_triage(app, pool).await? {
             ProcessOneResult::Idle => return Ok(()),
             // A short yield keeps the UI and IMAP reconnect work responsive
@@ -326,6 +391,7 @@ async fn process_background_triage_loop(
             }
         }
     }
+    Ok(())
 }
 
 pub fn start_background_triage(
@@ -353,8 +419,9 @@ pub async fn process_background_triage(
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_next_triage_job, complete_triage_job, enqueue_triage_job, process_one_triage_job,
-        retry_failed_triage_job, retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
+        claim_next_triage_job, complete_triage_job, enqueue_manual_triage_job, enqueue_triage_job,
+        process_one_triage_job, remove_stale_automatic_triage_jobs, retry_failed_triage_job,
+        retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
     };
     use crate::commands::test_support::TestDatabase;
     use chrono::{Duration, Utc};
@@ -629,6 +696,73 @@ mod tests {
             .unwrap();
         assert_eq!(state, ("pending".to_string(), 0, None));
         assert_eq!(mail_operations, 0);
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn recent_window_prunes_only_old_pending_automatic_jobs() {
+        let database = TestDatabase::new().await;
+        let now = Utc::now();
+        let old = now - Duration::days(8);
+        for (thread_id, message_id) in [
+            ("old-automatic", "old-automatic-message"),
+            ("old-manual", "old-manual-message"),
+            ("old-leased", "old-leased-message"),
+        ] {
+            database.seed_thread(thread_id).await;
+            database
+                .seed_message_for_thread(message_id, thread_id, &old.to_rfc3339())
+                .await;
+        }
+        enqueue_triage_job(
+            &database.pool,
+            "old-automatic",
+            "old-automatic-message",
+            old,
+            now,
+        )
+        .await
+        .unwrap();
+        enqueue_manual_triage_job(&database.pool, "old-manual", "old-manual-message", old, now)
+            .await
+            .unwrap();
+        enqueue_triage_job(&database.pool, "old-leased", "old-leased-message", old, now)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE background_triage_jobs SET status = 'leased' WHERE thread_id = 'old-leased'",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            remove_stale_automatic_triage_jobs(&database.pool, now - Duration::days(7))
+                .await
+                .unwrap(),
+            1
+        );
+        let remaining: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT thread_id, source, status FROM background_triage_jobs ORDER BY thread_id",
+        )
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            remaining,
+            vec![
+                (
+                    "old-leased".to_string(),
+                    "automatic".to_string(),
+                    "leased".to_string()
+                ),
+                (
+                    "old-manual".to_string(),
+                    "manual".to_string(),
+                    "pending".to_string()
+                ),
+            ]
+        );
         database.close().await;
     }
 }

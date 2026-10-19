@@ -191,6 +191,30 @@ pub async fn retry_triage_job(
     Ok(())
 }
 
+/// Returns a terminal local-analysis failure to the durable queue at the
+/// user's request. This is strictly local scheduling state: it never changes
+/// Gmail and it deliberately resets the retry budget for the new attempt.
+pub async fn retry_failed_triage_job(
+    pool: &SqlitePool,
+    thread_id: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, String> {
+    let now = now.to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE background_triage_jobs \
+         SET status = 'pending', attempt_count = 0, next_attempt_at = ?, \
+             lease_expires_at = NULL, last_error = NULL, updated_at = ? \
+         WHERE thread_id = ? AND status = 'failed'",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(thread_id)
+    .execute(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Runs at most one leased job. It does not discover new mail itself, so a
 /// future wake-up coordinator can decide when candidate discovery is safe.
 /// A failed executor result is persisted as a delayed retry rather than
@@ -330,7 +354,7 @@ pub async fn process_background_triage(
 mod tests {
     use super::{
         claim_next_triage_job, complete_triage_job, enqueue_triage_job, process_one_triage_job,
-        retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
+        retry_failed_triage_job, retry_triage_job, ProcessOneResult, TriageExecutor, TriageJob,
     };
     use crate::commands::test_support::TestDatabase;
     use chrono::{Duration, Utc};
@@ -575,6 +599,36 @@ mod tests {
                 .unwrap(),
             None
         );
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn user_can_retry_a_terminal_failure_without_creating_gmail_work() {
+        let database = TestDatabase::new().await;
+        let now = Utc::now();
+        seed_job(&database, "thread-retry", "message-retry", now).await;
+        sqlx::query(
+            "UPDATE background_triage_jobs SET status = 'failed', attempt_count = 3, last_error = 'bad JSON' WHERE thread_id = 'thread-retry'",
+        )
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        assert!(retry_failed_triage_job(&database.pool, "thread-retry", now)
+            .await
+            .unwrap());
+        let state: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT status, attempt_count, last_error FROM background_triage_jobs WHERE thread_id = 'thread-retry'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        let mail_operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_operations")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(state, ("pending".to_string(), 0, None));
+        assert_eq!(mail_operations, 0);
         database.close().await;
     }
 }

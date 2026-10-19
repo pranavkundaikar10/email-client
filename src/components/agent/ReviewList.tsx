@@ -152,6 +152,8 @@ export default function ReviewList({ accountId }: { accountId: string }) {
       importance={"analysis_available" in item && item.analysis_available ? item.importance : undefined}
       footer={followUp && "due_at" in item
         ? <p className={`px-3 pb-2 text-[10px] font-medium ${dueTone(item.due_at)}`}>{dueLabel(item.due_at)}</p>
+        : "triage_failed" in item && item.triage_failed
+        ? <p className="px-3 pb-2 text-[10px] font-medium text-red-600">AI triage failed</p>
         : undefined}
       onClick={() => setSelectedThread(item.thread_id)}
       onCheck={() => toggleThreadCheck(item.thread_id)}

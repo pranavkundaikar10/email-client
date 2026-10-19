@@ -145,6 +145,8 @@ export interface ReviewItem extends Thread {
   is_actionable: boolean;
   recommended_action: RecommendedAction;
   analysis_available: boolean;
+  triage_failed: boolean;
+  triage_error: string;
 }
 
 export interface FollowUpItem extends Thread {
@@ -302,6 +304,9 @@ export const api = {
 
   getReviewQueue: (limit = 50, sort: "priority" | "newest" | "oldest" = "priority") =>
     invoke<ReviewItem[]>("get_review_queue", { limit, sort }),
+
+  retryFailedTriage: (threadId: string) =>
+    invoke<void>("retry_failed_triage", { threadId }),
 
   recordReviewDecision: (threadId: string, decision: "keep" | "follow_up" | "archived") =>
     invoke<void>("record_review_decision", { threadId, decision }),

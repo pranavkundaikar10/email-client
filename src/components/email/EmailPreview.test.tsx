@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EmailPreview from "./EmailPreview";
 import { useAppStore } from "../../store";
@@ -11,6 +11,7 @@ const { apiMocks, mailActionMocks, mailFlagMocks } = vi.hoisted(() => ({
     getReviewQueue: vi.fn(),
     getFollowUps: vi.fn(),
     getThreadAnalysis: vi.fn(),
+    retryFailedTriage: vi.fn(),
     recordReviewDecision: vi.fn(),
     completeFollowUp: vi.fn(),
   },
@@ -71,6 +72,7 @@ describe("EmailPreview review shortcuts", () => {
     apiMocks.getMessages.mockResolvedValue([]);
     apiMocks.getAiAssistanceSettings.mockResolvedValue({ enabled: false });
     apiMocks.getThreadAnalysis.mockResolvedValue(null);
+    apiMocks.retryFailedTriage.mockResolvedValue(undefined);
     apiMocks.getReviewQueue.mockResolvedValue([]);
     apiMocks.getFollowUps.mockResolvedValue([]);
     apiMocks.recordReviewDecision.mockResolvedValue(undefined);
@@ -116,6 +118,24 @@ describe("EmailPreview review shortcuts", () => {
 
     await waitFor(() => expect(apiMocks.completeFollowUp).toHaveBeenCalledWith(selectedThread.id));
     expect(apiMocks.recordReviewDecision).toHaveBeenCalledWith(selectedThread.id, "keep");
+    expect(mailActionMocks.archiveThread).not.toHaveBeenCalled();
+    expect(mailActionMocks.deleteThread).not.toHaveBeenCalled();
+  });
+
+  it("shows a terminal AI failure and lets the user retry it", async () => {
+    apiMocks.getReviewQueue.mockResolvedValue([{
+      thread_id: selectedThread.id,
+      analysis_available: false,
+      triage_failed: true,
+      triage_error: "model response was incomplete",
+      recommended_action: "review",
+    }]);
+    renderPreview();
+
+    expect(await screen.findByText("AI triage needs attention")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry AI" }));
+
+    await waitFor(() => expect(apiMocks.retryFailedTriage).toHaveBeenCalledWith(selectedThread.id));
     expect(mailActionMocks.archiveThread).not.toHaveBeenCalled();
     expect(mailActionMocks.deleteThread).not.toHaveBeenCalled();
   });

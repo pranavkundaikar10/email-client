@@ -704,6 +704,18 @@ export default function EmailPreview({ email, accountId, reviewMode = false, fol
     onError: (err) => addToast(`Analysis failed: ${String(err)}`),
   });
 
+  const { mutate: retryFailedTriage, isPending: retryingTriage } = useMutation({
+    mutationFn: (threadId: string) => api.retryFailedTriage(threadId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["review_queue"] }),
+        queryClient.invalidateQueries({ queryKey: ["auto_analysis_pending_count"] }),
+      ]);
+      addToast("AI triage retry started");
+    },
+    onError: (err) => addToast(`Could not retry AI triage: ${String(err)}`),
+  });
+
   const { mutate: recordReview, isPending: savingReview } = useMutation({
     mutationFn: async ({ threadId, decision }: { threadId: string; decision: "keep" | "follow_up" | "archived" }) => {
       if (decision === "archived") await queueArchiveThread(threadId);
@@ -970,12 +982,23 @@ export default function EmailPreview({ email, accountId, reviewMode = false, fol
                 <p className={`mt-1.5 text-sm font-medium ${recommendationTone(reviewItem.recommended_action)}`}>
                   {recommendationLabel(reviewItem.recommended_action)}
                 </p>
+              </> : reviewItem.triage_failed ? <>
+                <p className="text-xs font-semibold uppercase tracking-wide text-red-600">AI triage needs attention</p>
+                <p className="mt-1.5 text-sm font-medium text-gray-700">Review this email without AI, or retry analysis.</p>
+                <p className="mt-1 max-w-xl truncate text-xs text-gray-500" title={reviewItem.triage_error}>{reviewItem.triage_error}</p>
               </> : <>
                 <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Review this email</p>
                 <p className="mt-1.5 text-sm font-medium text-gray-700">Choose what happens next</p>
               </>}
             </div>
             <div className="flex items-center gap-2">
+              {reviewItem.triage_failed && <button
+                disabled={retryingTriage || savingReview || deletingFromReview}
+                onClick={() => retryFailedTriage(reviewItem.thread_id)}
+                className="rounded-md px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40"
+              >
+                {retryingTriage ? "Retrying…" : "Retry AI"}
+              </button>}
               <button
                 disabled={savingReview || deletingFromReview || schedulingFollowUp}
                 onClick={() => setFollowUpPickerOpen(true)}

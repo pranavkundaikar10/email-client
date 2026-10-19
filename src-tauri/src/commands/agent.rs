@@ -91,7 +91,8 @@ impl Default for ThinkingSettings {
     }
 }
 
-/// An analyzed email waiting for the user's explicit triage decision.
+/// An inbox email waiting for the user's explicit triage decision. It may
+/// either have an AI recommendation or a visible terminal analysis failure.
 #[derive(Debug, Serialize, FromRow)]
 pub struct ReviewItem {
     pub thread_id: String,
@@ -116,6 +117,8 @@ pub struct ReviewItem {
     pub is_actionable: bool,
     pub recommended_action: String,
     pub analysis_available: bool,
+    pub triage_failed: bool,
+    pub triage_error: String,
 }
 
 /// A locally scheduled follow-up attached to an inbox thread. It never moves
@@ -1198,6 +1201,32 @@ pub async fn get_review_queue(
     review_queue_for_pool(pool.inner(), limit, sort).await
 }
 
+/// Explicitly requeue a terminal local-analysis failure. The worker owns all
+/// IMAP/Ollama work after this point; retrying does not create a Gmail action.
+#[tauri::command]
+pub async fn retry_failed_triage(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    worker: tauri::State<'_, crate::commands::triage_worker::BackgroundTriageWorker>,
+    thread_id: String,
+) -> Result<(), String> {
+    let retried = crate::commands::triage_worker::retry_failed_triage_job(
+        pool.inner(),
+        &thread_id,
+        Utc::now(),
+    )
+    .await?;
+    if !retried {
+        return Err("This email is not awaiting a triage retry".to_string());
+    }
+    crate::commands::triage_worker::start_background_triage(
+        app,
+        pool.inner().clone(),
+        worker.inner().clone(),
+    );
+    Ok(())
+}
+
 async fn review_queue_for_pool(
     pool: &SqlitePool,
     limit: Option<i64>,
@@ -1208,7 +1237,9 @@ async fn review_queue_for_pool(
     let order_by = match sort.as_deref() {
         Some("oldest") => "t.last_message_at ASC",
         Some("newest") => "t.last_message_at DESC",
-        _ if ai_assistance_enabled => "a.importance DESC, t.last_message_at DESC",
+        _ if ai_assistance_enabled => {
+            "CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END DESC, a.importance DESC, t.last_message_at DESC"
+        }
         _ => "t.last_message_at DESC",
     };
     let query = r#"
@@ -1223,16 +1254,19 @@ async fn review_queue_for_pool(
                COALESCE(a.action_items, '[]') AS action_items,
                a.deadline, COALESCE(a.is_actionable, 0) AS is_actionable,
                COALESCE(a.recommended_action, 'review') AS recommended_action,
-               a.thread_id IS NOT NULL AS analysis_available
+               a.thread_id IS NOT NULL AS analysis_available,
+               COALESCE(j.status = 'failed', 0) AS triage_failed,
+               COALESCE(j.last_error, '') AS triage_error
         FROM threads t
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_reviews r ON r.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
         WHERE t.folder = 'inbox' AND t.archived = 0
           AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
           AND r.thread_id IS NULL
-          AND (? = 0 OR a.thread_id IS NOT NULL)
+          AND (? = 0 OR a.thread_id IS NOT NULL OR j.status = 'failed')
         ORDER BY {order_by}
         LIMIT ?
         "#
@@ -1673,6 +1707,35 @@ mod action_contract_tests {
                 .collect::<Vec<_>>(),
             ["review-today", "review-older"]
         );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn review_queue_exposes_terminal_triage_failures_with_their_error() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        db.seed_thread("failed-triage").await;
+        db.seed_message_for_thread("failed-triage-message", "failed-triage", &now.to_rfc3339())
+            .await;
+        sqlx::query(
+            "INSERT INTO background_triage_jobs (thread_id, message_id, message_received_at, status, attempt_count, next_attempt_at, last_error, created_at, updated_at) VALUES ('failed-triage', 'failed-triage-message', ?, 'failed', 3, ?, 'model response was incomplete', ?, ?)",
+        )
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let rows = review_queue_for_pool(&db.pool, Some(50), Some("priority".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].thread_id, "failed-triage");
+        assert!(!rows[0].analysis_available);
+        assert!(rows[0].triage_failed);
+        assert_eq!(rows[0].triage_error, "model response was incomplete");
         db.close().await;
     }
 

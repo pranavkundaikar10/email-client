@@ -3,6 +3,7 @@ use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -243,6 +244,71 @@ pub fn account_email_for_id(app: &AppHandle, account_id: &str) -> Result<String,
         .ok_or_else(|| format!("No account found for {account_id}"))
 }
 
+/// Prefer the existing database identity for an email. Signing out removes
+/// credentials but intentionally retains local mail, so a later sign-in must
+/// reconnect to that same account row rather than generate a new UUID.
+async fn stable_account_id(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    email: &str,
+) -> Result<String, String> {
+    let database_id = database_account_id(pool, email).await?;
+    if let Some(id) = database_id {
+        return Ok(id);
+    }
+
+    Ok(stored_account_id(&load_store(app)?, email))
+}
+
+async fn database_account_id(pool: &SqlitePool, email: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar("SELECT id FROM accounts WHERE LOWER(email) = LOWER(?) LIMIT 1")
+        .bind(email)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn stored_account_id(store: &CredentialsStore, email: &str) -> String {
+    store
+        .accounts
+        .iter()
+        .find(|account| account.email.eq_ignore_ascii_case(email))
+        .map(|account| account.id.clone())
+        .filter(|id| Uuid::parse_str(id).is_ok())
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+async fn reconcile_store_account_ids_with_db(
+    store: &mut CredentialsStore,
+    pool: &SqlitePool,
+) -> Result<bool, String> {
+    let mut changed = false;
+    for account in &mut store.accounts {
+        if let Some(id) = database_account_id(pool, &account.email)
+            .await?
+            .filter(|id| id != &account.id)
+        {
+            account.id = id;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Repair credentials that were recreated for an email whose local database
+/// survived logout. This runs before sync workers start and never changes mail
+/// data; it only restores the credential store's stable account ID.
+pub async fn reconcile_account_ids_with_db(
+    app: &AppHandle,
+    pool: &SqlitePool,
+) -> Result<(), String> {
+    let mut store = load_store(app)?;
+    if reconcile_store_account_ids_with_db(&mut store, pool).await? {
+        save_store(app, &store)?;
+    }
+    Ok(())
+}
+
 async fn access_token_for(email: &str) -> Result<String, String> {
     let google_client = google_oauth_client()?;
     let cache = ACCESS_TOKEN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -322,7 +388,10 @@ pub fn invalidate_cached_access_token(email: &str) {
 }
 
 #[tauri::command]
-pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, String> {
+pub async fn connect_google_account(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<String, String> {
     let google_client = google_oauth_client()?;
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| format!("Could not start the secure sign-in callback: {e}"))?;
@@ -413,13 +482,7 @@ pub async fn connect_google_account(app: tauri::AppHandle) -> Result<String, Str
     .map_err(|e| e.to_string())??;
 
     let mut store = load_store(&app)?;
-    let existing_id = store
-        .accounts
-        .iter()
-        .find(|account| account.email == user.email)
-        .map(|account| account.id.clone())
-        .filter(|id| Uuid::parse_str(id).is_ok())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let existing_id = stable_account_id(&app, pool.inner(), &user.email).await?;
     store.accounts.retain(|account| account.email != user.email);
     store.accounts.push(StoredAccount {
         id: existing_id,
@@ -533,19 +596,14 @@ pub fn get_account_context(app: tauri::AppHandle, email: String) -> Result<Accou
 #[tauri::command]
 pub async fn add_account(
     app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
     email: String,
     password: String,
 ) -> Result<String, String> {
     crate::commands::sync::test_imap_connection(&email, &GmailAuth::AppPassword(password.clone()))
         .await?;
     let mut store = load_store(&app)?;
-    let existing_id = store
-        .accounts
-        .iter()
-        .find(|account| account.email == email)
-        .map(|account| account.id.clone())
-        .filter(|id| Uuid::parse_str(id).is_ok())
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let existing_id = stable_account_id(&app, pool.inner(), &email).await?;
     store.accounts.retain(|account| account.email != email);
     store.accounts.push(StoredAccount {
         id: existing_id,
@@ -571,4 +629,88 @@ pub async fn remove_account(app: tauri::AppHandle, email: String) -> Result<(), 
     }
     store.accounts.retain(|account| account.email != email);
     save_store(&app, &store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        database_account_id, reconcile_store_account_ids_with_db, stored_account_id, AuthKind,
+        CredentialsStore, StoredAccount,
+    };
+    use crate::commands::test_support::TestDatabase;
+    use uuid::Uuid;
+
+    fn account(id: &str, email: &str) -> StoredAccount {
+        StoredAccount {
+            id: id.to_string(),
+            email: email.to_string(),
+            password: String::new(),
+            auth_kind: AuthKind::AppPassword,
+            profile_picture: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn database_identity_wins_when_reconnecting_an_existing_email() {
+        let database = TestDatabase::new().await;
+        database
+            .seed_account("persisted-account", "person@example.com")
+            .await;
+
+        assert_eq!(
+            database_account_id(&database.pool, "PERSON@EXAMPLE.COM")
+                .await
+                .unwrap(),
+            Some("persisted-account".to_string()),
+            "an email address must reconnect to the account that owns its existing local mail"
+        );
+        database.close().await;
+    }
+
+    #[test]
+    fn new_email_reuses_a_valid_stored_identity_or_generates_a_uuid() {
+        let existing_id = Uuid::new_v4().to_string();
+        let existing = CredentialsStore {
+            accounts: vec![account(&existing_id, "person@example.com")],
+        };
+        assert_eq!(
+            stored_account_id(&existing, "PERSON@example.com"),
+            existing_id
+        );
+
+        let new_identity =
+            stored_account_id(&CredentialsStore { accounts: vec![] }, "new@example.com");
+        assert!(Uuid::parse_str(&new_identity).is_ok());
+    }
+
+    #[tokio::test]
+    async fn startup_reconciliation_restores_database_account_ids_without_touching_other_accounts()
+    {
+        let database = TestDatabase::new().await;
+        database
+            .seed_account("persisted-account", "person@example.com")
+            .await;
+        let untouched_id = Uuid::new_v4().to_string();
+        let mut store = CredentialsStore {
+            accounts: vec![
+                account("recreated-account", "PERSON@example.com"),
+                account(&untouched_id, "other@example.com"),
+            ],
+        };
+
+        assert!(
+            reconcile_store_account_ids_with_db(&mut store, &database.pool)
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.accounts[0].id, "persisted-account");
+        assert_eq!(store.accounts[1].id, untouched_id);
+        assert!(
+            !reconcile_store_account_ids_with_db(&mut store, &database.pool)
+                .await
+                .unwrap(),
+            "reconciliation must be idempotent"
+        );
+        database.close().await;
+    }
 }

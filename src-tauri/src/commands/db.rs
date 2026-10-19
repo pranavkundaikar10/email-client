@@ -102,6 +102,7 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
 /// A one-time backup is retained beside the database before changing existing
 /// data so the original local state remains recoverable.
 pub async fn normalize_account_ids(app: &AppHandle, pool: &SqlitePool) -> Result<(), String> {
+    crate::commands::auth::reconcile_account_ids_with_db(app, pool).await?;
     let accounts: Vec<(String, String)> = sqlx::query_as("SELECT id, email FROM accounts")
         .fetch_all(pool)
         .await

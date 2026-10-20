@@ -22,7 +22,7 @@ function dueTone(dueAt: string) {
   return due < endToday ? "text-amber-700" : "text-gray-500";
 }
 
-export default function FollowUpList() {
+export default function FollowUpList({ accountId }: { accountId: string }) {
   const selectedThreadId = useAppStore((s) => s.selectedThreadId);
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const checkedThreadIds = useAppStore((s) => s.checkedThreadIds);
@@ -33,9 +33,10 @@ export default function FollowUpList() {
   const { setStarred } = useMailFlags();
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const { data: followUps = [], isLoading } = useQuery({
-    queryKey: ["follow_ups"],
-    queryFn: api.getFollowUps,
+    queryKey: ["follow_ups", accountId],
+    queryFn: () => api.getFollowUps(accountId),
     refetchInterval: 60_000,
+    enabled: Boolean(accountId),
   });
   useVisibleThreadList(followUps);
 

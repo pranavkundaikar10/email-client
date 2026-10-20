@@ -8,7 +8,7 @@ const { apiMocks, mailActionMocks, mailFlagMocks } = vi.hoisted(() => ({
   apiMocks: {
     getMessages: vi.fn(),
     getAiAssistanceSettings: vi.fn(),
-    getReviewQueue: vi.fn(),
+    getReviewQueueItem: vi.fn(),
     getFollowUps: vi.fn(),
     getThreadAnalysis: vi.fn(),
     retryFailedTriage: vi.fn(),
@@ -73,7 +73,7 @@ describe("EmailPreview review shortcuts", () => {
     apiMocks.getAiAssistanceSettings.mockResolvedValue({ enabled: false });
     apiMocks.getThreadAnalysis.mockResolvedValue(null);
     apiMocks.retryFailedTriage.mockResolvedValue(undefined);
-    apiMocks.getReviewQueue.mockResolvedValue([]);
+    apiMocks.getReviewQueueItem.mockResolvedValue(null);
     apiMocks.getFollowUps.mockResolvedValue([]);
     apiMocks.recordReviewDecision.mockResolvedValue(undefined);
     apiMocks.completeFollowUp.mockResolvedValue(undefined);
@@ -89,11 +89,11 @@ describe("EmailPreview review shortcuts", () => {
   });
 
   it("I keeps a reviewed email locally without queuing archive or delete", async () => {
-    apiMocks.getReviewQueue.mockResolvedValue([{
+    apiMocks.getReviewQueueItem.mockResolvedValue({
       thread_id: selectedThread.id,
       analysis_available: true,
       recommended_action: "keep",
-    }]);
+    });
     renderPreview();
 
     await screen.findByRole("button", { name: "Keep" });
@@ -123,13 +123,13 @@ describe("EmailPreview review shortcuts", () => {
   });
 
   it("shows a terminal AI failure and lets the user retry it", async () => {
-    apiMocks.getReviewQueue.mockResolvedValue([{
+    apiMocks.getReviewQueueItem.mockResolvedValue({
       thread_id: selectedThread.id,
       analysis_available: false,
       triage_failed: true,
       triage_error: "model response was incomplete",
       recommended_action: "review",
-    }]);
+    });
     renderPreview();
 
     expect(await screen.findByText("AI triage needs attention")).toBeInTheDocument();

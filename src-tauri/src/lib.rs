@@ -101,6 +101,7 @@ pub fn run() {
             agent::enqueue_backlog_triage,
             triage_worker::process_background_triage,
             agent::get_review_queue,
+            agent::get_review_queue_item,
             agent::retry_failed_triage,
             agent::record_review_decision,
             agent::schedule_follow_up,

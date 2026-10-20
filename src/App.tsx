@@ -129,8 +129,9 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
     refetchInterval: 60_000,
   });
   const { data: followUps = [] } = useQuery({
-    queryKey: ["follow_ups"],
-    queryFn: api.getFollowUps,
+    queryKey: ["follow_ups", accountContext?.id],
+    queryFn: () => api.getFollowUps(accountContext!.id),
+    enabled: Boolean(accountContext?.id),
     refetchInterval: 60_000,
   });
   const followUpDueCount = useMemo(() => {
@@ -140,25 +141,25 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
   }, [followUps]);
 
   useEffect(() => {
-    if (startupViewResolved.current || !initialSyncComplete) return;
+    if (startupViewResolved.current || !initialSyncComplete || !accountContext?.id) return;
     let cancelled = false;
     // Read a fresh startup snapshot rather than relying on whichever list
     // cache happened to render first during sync.
-    Promise.all([api.getReviewQueue(50, "priority"), api.getAutoAnalysisPendingCount(), api.getFollowUps()])
+    Promise.all([api.getReviewQueue(accountContext.id, 1, "priority"), api.getAutoAnalysisPendingCount(accountContext.id), api.getFollowUps(accountContext.id)])
       .then(([queue, pendingCount, startupFollowUps]) => {
         if (cancelled || startupViewResolved.current) return;
         startupViewResolved.current = true;
         const endToday = new Date();
         endToday.setHours(23, 59, 59, 999);
         const hasDueFollowUp = startupFollowUps.some((item) => new Date(item.due_at) <= endToday);
-        if (queue.length === 0 && pendingCount === 0 && !hasDueFollowUp) setActiveView("inbox");
+        if (queue.total === 0 && pendingCount === 0 && !hasDueFollowUp) setActiveView("inbox");
       })
       .catch(() => {
         // Keep Review as the safe default if the local status lookup fails.
         if (!cancelled) startupViewResolved.current = true;
       });
     return () => { cancelled = true; };
-  }, [initialSyncComplete]);
+  }, [accountContext?.id, initialSyncComplete]);
 
   const splitDefs = useMemo(
     () => rawSplits.map((s) => ({ id: s.id, label: s.name })),
@@ -411,7 +412,7 @@ function InboxApp({ email, onLogout }: { email: string; onLogout: () => void }) 
               effectiveSplitId={effectiveSplitId}
               searchResults={searchResults}
               isSearching
-            /> : activeView === "review" ? <ReviewList accountId={accountContext?.id ?? ""} /> : activeView === "follow_ups" ? <FollowUpList /> : <ThreadList
+            /> : activeView === "review" ? <ReviewList accountId={accountContext?.id ?? ""} /> : activeView === "follow_ups" ? <FollowUpList accountId={accountContext?.id ?? ""} /> : <ThreadList
               accountId={accountContext?.id ?? ""}
               activeView={activeView}
               effectiveSplitId={effectiveSplitId}

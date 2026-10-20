@@ -654,16 +654,15 @@ export default function EmailPreview({ email, accountId, reviewMode = false, fol
   });
   useUpcomingBodyPrefetch(email, accountId);
 
-  const { data: reviewQueue = [] } = useQuery({
-    queryKey: ["review_queue", "priority"],
-    queryFn: () => api.getReviewQueue(50, "priority"),
-    enabled: reviewMode,
+  const { data: reviewItem } = useQuery({
+    queryKey: ["review_queue_item", accountId, selectedThreadId],
+    queryFn: () => api.getReviewQueueItem(accountId, selectedThreadId!),
+    enabled: reviewMode && Boolean(accountId) && Boolean(selectedThreadId),
   });
-  const reviewItem = reviewQueue.find((item) => item.thread_id === selectedThreadId);
   const { data: followUps = [] } = useQuery({
-    queryKey: ["follow_ups"],
-    queryFn: api.getFollowUps,
-    enabled: followUpMode || reviewMode,
+    queryKey: ["follow_ups", accountId],
+    queryFn: () => api.getFollowUps(accountId),
+    enabled: (followUpMode || reviewMode) && Boolean(accountId),
   });
   const followUpItem = followUps.find((item) => item.thread_id === selectedThreadId);
 

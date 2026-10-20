@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import ThreadItem from "../email/ThreadItem";
@@ -37,13 +37,19 @@ export default function ReviewList({ accountId }: { accountId: string }) {
   const { archiveThreads, deleteThreads } = useMailActions();
   const { setStarred } = useMailFlags();
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [sort, setSort] = useState<"priority" | "newest" | "oldest">("priority");
   const [queueingBacklog, setQueueingBacklog] = useState(false);
-  const { data: queue = [], isLoading } = useQuery({
-    queryKey: ["review_queue", sort],
-    queryFn: () => api.getReviewQueue(50, sort),
+  const { data: queuePages, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: ["review_queue", accountId, sort],
+    queryFn: ({ pageParam }) => api.getReviewQueue(accountId, 50, sort, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (page) => page.next_offset ?? undefined,
     refetchInterval: 60_000,
+    enabled: Boolean(accountId),
   });
+  const queue = useMemo(() => queuePages?.pages.flatMap((page) => page.items) ?? [], [queuePages]);
+  const reviewTotal = queuePages?.pages[0]?.total ?? 0;
   const { data: aiAssistanceSettings = { enabled: true } } = useQuery({
     queryKey: ["ai_assistance_settings"],
     queryFn: api.getAiAssistanceSettings,
@@ -57,15 +63,16 @@ export default function ReviewList({ accountId }: { accountId: string }) {
   });
   const aiUnavailable = aiAssistanceSettings.enabled && (ollamaFailed || (ollamaLoaded && ollamaModels.length === 0));
   const { data: pendingCount = 0 } = useQuery({
-    queryKey: ["auto_analysis_pending_count"],
-    queryFn: api.getAutoAnalysisPendingCount,
+    queryKey: ["auto_analysis_pending_count", accountId],
+    queryFn: () => api.getAutoAnalysisPendingCount(accountId),
     refetchInterval: 60_000,
-    enabled: aiAssistanceSettings.enabled,
+    enabled: aiAssistanceSettings.enabled && Boolean(accountId),
   });
   const { data: followUps = [] } = useQuery({
-    queryKey: ["follow_ups"],
-    queryFn: api.getFollowUps,
+    queryKey: ["follow_ups", accountId],
+    queryFn: () => api.getFollowUps(accountId),
     refetchInterval: 60_000,
+    enabled: Boolean(accountId),
   });
 
   const [dueFollowUps, today, earlier] = useMemo(() => {
@@ -138,6 +145,18 @@ export default function ReviewList({ accountId }: { accountId: string }) {
     }
   }
 
+  function renderOlderBatchButton(className: string) {
+    if (!aiAssistanceSettings.enabled) return null;
+    return <button
+      type="button"
+      disabled={!accountId || queueingBacklog}
+      onClick={() => void queueOlderEmails()}
+      className={className}
+    >
+      {queueingBacklog ? "Finding older emails…" : "Review next 50 older emails"}
+    </button>;
+  }
+
   function renderItems(items: ReviewSidebarItem[], followUp = false) {
     return items.map((item) => <div
       key={item.thread_id}
@@ -161,6 +180,14 @@ export default function ReviewList({ accountId }: { accountId: string }) {
     /></div>);
   }
 
+  function loadMoreOnScroll() {
+    const container = scrollContainerRef.current;
+    if (!container || !hasNextPage || isFetchingNextPage) return;
+    if (container.scrollHeight - container.scrollTop - container.clientHeight < 240) {
+      void fetchNextPage();
+    }
+  }
+
   if (isLoading) return <div className="flex-1 flex items-center justify-center text-sm text-gray-400">Loading…</div>;
   if (visibleReviewThreads.length === 0) {
     return <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
@@ -176,14 +203,7 @@ export default function ReviewList({ accountId }: { accountId: string }) {
         <Check size={22} className="text-emerald-500" />
         <p className="mt-3 text-sm font-medium text-gray-700">You’re caught up</p>
         <p className="mt-1 text-xs text-gray-400">{aiAssistanceSettings.enabled ? "New analyzed emails will appear here automatically." : "New inbox emails will appear here for review."}</p>
-        {aiAssistanceSettings.enabled && <button
-          type="button"
-          disabled={!accountId || queueingBacklog}
-          onClick={() => void queueOlderEmails()}
-          className="mt-5 rounded-md border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60"
-        >
-          {queueingBacklog ? "Finding older emails…" : "Review next 20 older emails"}
-        </button>}
+        {renderOlderBatchButton("mt-5 rounded-md border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60")}
       </>}
     </div>;
   }
@@ -197,7 +217,7 @@ export default function ReviewList({ accountId }: { accountId: string }) {
     />
     <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2">
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{visibleReviewThreads.length} to review</span>
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{reviewTotal} to review</span>
         {aiUnavailable ? <span className="text-[10px] font-medium text-amber-700">AI unavailable</span> : aiAssistanceSettings.enabled && pendingCount > 0 && <span
           className="flex items-center gap-1 text-[10px] font-medium tabular-nums text-indigo-500"
           title={`${pendingCount} ${pendingCount === 1 ? "email is" : "emails are"} awaiting AI analysis`}
@@ -220,7 +240,7 @@ export default function ReviewList({ accountId }: { accountId: string }) {
         </select>
       </div>
     </div>
-    <div className="flex-1 overflow-y-auto">
+    <div ref={scrollContainerRef} onScroll={loadMoreOnScroll} className="flex-1 overflow-y-auto">
     {dueFollowUps.length > 0 && <>
       <p className={`border-b px-3 py-2 text-[10px] font-semibold uppercase tracking-wide ${dueFollowUps.some((item) => new Date(item.due_at) < new Date()) ? "border-red-100 bg-red-50/50 text-red-700" : "border-amber-200 bg-amber-50/50 text-amber-700"}`}>Due follow-ups · {dueFollowUps.length}</p>
       {renderItems(dueFollowUps, true)}
@@ -233,6 +253,10 @@ export default function ReviewList({ accountId }: { accountId: string }) {
       <p className="border-y border-gray-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Older · {earlier.length}</p>
       {renderItems(earlier)}
     </>}
+    {isFetchingNextPage && <div className="flex justify-center py-3"><LoaderCircle size={16} className="animate-spin text-gray-400" /></div>}
+    </div>
+    <div className="shrink-0 border-t border-gray-100 bg-white px-3 py-2">
+      {renderOlderBatchButton("w-full rounded-md border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition-colors hover:bg-indigo-50 disabled:cursor-wait disabled:opacity-60")}
     </div>
   </div>;
 }

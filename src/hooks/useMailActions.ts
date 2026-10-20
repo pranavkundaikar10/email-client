@@ -6,7 +6,7 @@ import { useAppStore } from "../store";
 type MailAction = "archive" | "delete";
 type ThreadLike = { id?: string; thread_id?: string };
 
-function withoutThreads(data: unknown, ids: Set<string>): unknown {
+export function withoutThreads(data: unknown, ids: Set<string>): unknown {
   if (Array.isArray(data)) {
     return data.filter((item) => {
       const thread = item as ThreadLike;
@@ -16,7 +16,39 @@ function withoutThreads(data: unknown, ids: Set<string>): unknown {
   // React Query stores paginated inboxes as { pages, pageParams }.
   if (data && typeof data === "object" && "pages" in data) {
     const paged = data as { pages: unknown[]; pageParams: unknown[] };
-    return { ...paged, pages: paged.pages.map((page) => withoutThreads(page, ids)) };
+    const visibleIds = new Set(
+      paged.pages.flatMap((page) => {
+        if (!page || typeof page !== "object" || !("items" in page)) return [];
+        return (page as { items: ThreadLike[] }).items.map((item) => item.thread_id ?? item.id ?? "");
+      }),
+    );
+    const removedFromPagedList = [...ids].filter((id) => visibleIds.has(id)).length;
+    return {
+      ...paged,
+      pages: paged.pages.map((page) => {
+        const updated = withoutThreads(page, ids);
+        if (!removedFromPagedList || !updated || typeof updated !== "object" || !page || typeof page !== "object" || !("total" in page)) return updated;
+        return {
+          ...(updated as object),
+          total: Math.max(0, (page as { total: number }).total - removedFromPagedList),
+        };
+      }),
+    };
+  }
+  // The Review Queue uses infinite-query pages. Remove the row and update the
+  // user-facing total in the same render as every other thread list.
+  if (data && typeof data === "object" && "items" in data) {
+    const page = data as { items: unknown[]; total?: number };
+    const items = page.items.filter((item) => {
+      const thread = item as ThreadLike;
+      return !ids.has(thread.thread_id ?? thread.id ?? "");
+    });
+    const removed = page.items.length - items.length;
+    return {
+      ...page,
+      items,
+      ...(typeof page.total === "number" ? { total: Math.max(0, page.total - removed) } : {}),
+    };
   }
   return data;
 }

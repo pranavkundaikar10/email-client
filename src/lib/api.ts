@@ -41,6 +41,12 @@ export interface BacklogTriageResult {
   headers_discovered: number;
 }
 
+export interface ReviewQueuePage {
+  items: ReviewItem[];
+  total: number;
+  next_offset: number | null;
+}
+
 export interface EmailAttachment {
   id: string;
   message_id: string;
@@ -293,8 +299,8 @@ export const api = {
   getAutoAnalysisCandidates: (limit = 1) =>
     invoke<AutoAnalysisCandidate[]>("get_auto_analysis_candidates", { limit }),
 
-  getAutoAnalysisPendingCount: () =>
-    invoke<number>("get_auto_analysis_pending_count"),
+  getAutoAnalysisPendingCount: (accountId: string) =>
+    invoke<number>("get_auto_analysis_pending_count", { accountId }),
 
   enqueueBacklogTriage: (accountId: string) =>
     invoke<BacklogTriageResult>("enqueue_backlog_triage", { accountId }),
@@ -302,8 +308,11 @@ export const api = {
   processBackgroundTriage: () =>
     invoke<void>("process_background_triage"),
 
-  getReviewQueue: (limit = 50, sort: "priority" | "newest" | "oldest" = "priority") =>
-    invoke<ReviewItem[]>("get_review_queue", { limit, sort }),
+  getReviewQueue: (accountId: string, limit = 50, sort: "priority" | "newest" | "oldest" = "priority", offset = 0) =>
+    invoke<ReviewQueuePage>("get_review_queue", { accountId, limit, sort, offset }),
+
+  getReviewQueueItem: (accountId: string, threadId: string) =>
+    invoke<ReviewItem | null>("get_review_queue_item", { accountId, threadId }),
 
   retryFailedTriage: (threadId: string) =>
     invoke<void>("retry_failed_triage", { threadId }),
@@ -317,8 +326,8 @@ export const api = {
   completeFollowUp: (threadId: string) =>
     invoke<void>("complete_follow_up", { threadId }),
 
-  getFollowUps: () =>
-    invoke<FollowUpItem[]>("get_follow_ups"),
+  getFollowUps: (accountId: string) =>
+    invoke<FollowUpItem[]>("get_follow_ups", { accountId }),
 
   getDigest: (limit = 50) =>
     invoke<DigestItem[]>("get_digest", { limit }),

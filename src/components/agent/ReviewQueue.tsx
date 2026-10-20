@@ -22,17 +22,19 @@ function severity(importance: number): string {
   return "Low";
 }
 
-export default function ReviewQueue({ onClose }: { onClose: () => void }) {
+export default function ReviewQueue({ onClose, accountId }: { onClose: () => void; accountId: string }) {
   const queryClient = useQueryClient();
   const setSelectedThread = useAppStore((s) => s.setSelectedThread);
   const addToast = useAppStore((s) => s.addToast);
   const [offset, setOffset] = useState(0);
   const [saving, setSaving] = useState(false);
   const { archiveThread } = useMailActions();
-  const { data: queue = [], isLoading } = useQuery({
-    queryKey: ["review_queue"],
-    queryFn: () => api.getReviewQueue(),
+  const { data: page, isLoading } = useQuery({
+    queryKey: ["review_queue", accountId, "priority"],
+    queryFn: () => api.getReviewQueue(accountId),
+    enabled: Boolean(accountId),
   });
+  const queue = page?.items ?? [];
   const item = queue[offset] ?? queue[0];
 
   async function decide(decision: "keep" | "follow_up" | "archived") {

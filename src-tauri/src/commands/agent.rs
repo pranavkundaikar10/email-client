@@ -6,6 +6,7 @@ const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "gemma4:e4b";
 const MAX_BODY_CHARS: usize = 1800;
 const MAX_TRIAGE_PREFERENCES_CHARS: usize = 1000;
+const BACKLOG_TRIAGE_BATCH_SIZE: i64 = 50;
 
 #[derive(Debug, Serialize, Deserialize, Clone, FromRow)]
 pub struct AnalysisRow {
@@ -119,6 +120,15 @@ pub struct ReviewItem {
     pub analysis_available: bool,
     pub triage_failed: bool,
     pub triage_error: String,
+}
+
+/// One locally paged slice of the account's review queue. Paging is local
+/// SQLite work only; it never fetches mail or invokes the AI worker.
+#[derive(Debug, Serialize)]
+pub struct ReviewQueuePage {
+    pub items: Vec<ReviewItem>,
+    pub total: i64,
+    pub next_offset: Option<i64>,
 }
 
 /// A locally scheduled follow-up attached to an inbox thread. It never moves
@@ -1019,7 +1029,7 @@ pub(crate) async fn backlog_analysis_candidates(
         "#,
     )
     .bind(account_id)
-    .bind(limit.clamp(1, 20))
+    .bind(limit.clamp(1, BACKLOG_TRIAGE_BATCH_SIZE))
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1064,7 +1074,7 @@ pub(crate) async fn enqueue_backlog_triage_candidates(
     Ok(candidates.len())
 }
 
-/// Add the next twenty newest unreviewed inbox emails for this account. If
+/// Add the next fifty newest unreviewed inbox emails for this account. If
 /// the local header cache is too shallow, it reads bounded older-header pages
 /// from Gmail first. Neither discovery nor triage changes Gmail mail state.
 #[tauri::command]
@@ -1078,14 +1088,13 @@ pub async fn enqueue_backlog_triage(
         return Err("AI assistance is turned off in Settings".to_string());
     }
 
-    const BATCH_SIZE: i64 = 20;
     const MAX_DISCOVERY_PAGES: usize = 5;
     let mut headers_discovered = 0;
     for _ in 0..MAX_DISCOVERY_PAGES {
-        if backlog_analysis_candidates(pool.inner(), &account_id, BATCH_SIZE)
+        if backlog_analysis_candidates(pool.inner(), &account_id, BACKLOG_TRIAGE_BATCH_SIZE)
             .await?
             .len()
-            >= BATCH_SIZE as usize
+            >= BACKLOG_TRIAGE_BATCH_SIZE as usize
         {
             break;
         }
@@ -1109,9 +1118,13 @@ pub async fn enqueue_backlog_triage(
         }
     }
 
-    let queued =
-        enqueue_backlog_triage_candidates(pool.inner(), &account_id, BATCH_SIZE, Utc::now())
-            .await?;
+    let queued = enqueue_backlog_triage_candidates(
+        pool.inner(),
+        &account_id,
+        BACKLOG_TRIAGE_BATCH_SIZE,
+        Utc::now(),
+    )
+    .await?;
     if queued > 0 {
         crate::commands::triage_worker::start_background_triage(
             app,
@@ -1135,13 +1148,28 @@ pub(crate) async fn background_triage_enabled(pool: &SqlitePool) -> Result<bool,
 #[tauri::command]
 pub async fn get_auto_analysis_pending_count(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
 ) -> Result<i64, String> {
-    background_analysis_pending_count(pool.inner(), Utc::now() - chrono::Duration::days(7)).await
+    background_analysis_pending_count_for_account(
+        pool.inner(),
+        Utc::now() - chrono::Duration::days(7),
+        Some(&account_id),
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn background_analysis_pending_count(
     pool: &SqlitePool,
     oldest_eligible_at: DateTime<Utc>,
+) -> Result<i64, String> {
+    background_analysis_pending_count_for_account(pool, oldest_eligible_at, None).await
+}
+
+async fn background_analysis_pending_count_for_account(
+    pool: &SqlitePool,
+    oldest_eligible_at: DateTime<Utc>,
+    account_id: Option<&str>,
 ) -> Result<i64, String> {
     if !configured_ai_assistance(pool).await?.enabled {
         return Ok(0);
@@ -1149,8 +1177,8 @@ async fn background_analysis_pending_count(
     // Count both unqueued inbox threads and durable jobs. Failed jobs are not
     // counted here because Review exposes them separately for explicit retry
     // or manual handling.
-    sqlx::query_scalar::<_, i64>(
-        r#"
+    let account_filter = account_id.map(|_| " AND t.account_id = ?").unwrap_or("");
+    let query = r#"
         SELECT COUNT(*) FROM (
           SELECT t.id AS thread_id
           FROM threads t
@@ -1162,7 +1190,7 @@ async fn background_analysis_pending_count(
             AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
             AND t.last_message_at >= ?
             AND (a.thread_id IS NULL OR a.analyzed_at < t.last_message_at)
-            AND j.thread_id IS NULL
+            AND j.thread_id IS NULL{account_filter}
 
           UNION
 
@@ -1174,12 +1202,16 @@ async fn background_analysis_pending_count(
             AND t.folder = 'inbox' AND t.archived = 0
             AND r.thread_id IS NULL
             AND (j.source = 'manual' OR t.last_message_at >= ?)
-            AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+            AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress')){account_filter}
         )
-        "#,
-    )
-    .bind(oldest_eligible_at.to_rfc3339())
-    .bind(oldest_eligible_at.to_rfc3339())
+        "#
+        .replace("{account_filter}", account_filter);
+    let mut query = sqlx::query_scalar::<_, i64>(&query)
+        .bind(oldest_eligible_at.to_rfc3339());
+    if let Some(account_id) = account_id { query = query.bind(account_id); }
+    query = query.bind(oldest_eligible_at.to_rfc3339());
+    if let Some(account_id) = account_id { query = query.bind(account_id); }
+    query
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1191,10 +1223,54 @@ async fn background_analysis_pending_count(
 #[tauri::command]
 pub async fn get_review_queue(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
     limit: Option<i64>,
     sort: Option<String>,
-) -> Result<Vec<ReviewItem>, String> {
-    review_queue_for_pool(pool.inner(), limit, sort).await
+    offset: Option<i64>,
+) -> Result<ReviewQueuePage, String> {
+    review_queue_for_pool(pool.inner(), &account_id, limit, sort, offset).await
+}
+
+/// Looks up the selected review item without assuming it was in the first
+/// loaded page of the sidebar.
+#[tauri::command]
+pub async fn get_review_queue_item(
+    pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
+    thread_id: String,
+) -> Result<Option<ReviewItem>, String> {
+    let ai_assistance_enabled = configured_ai_assistance(pool.inner()).await?.enabled;
+    sqlx::query_as::<_, ReviewItem>(
+        r#"
+        SELECT t.id AS thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
+               t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
+               COALESCE(m.from_name, '') AS from_name, COALESCE(m.from_email, '') AS from_email,
+               COALESCE(m.to_emails, '[]') AS to_emails, COALESCE(a.importance, 0) AS importance,
+               COALESCE(a.category, '') AS category, COALESCE(a.summary, '') AS summary,
+               COALESCE(a.action_items, '[]') AS action_items, a.deadline,
+               COALESCE(a.is_actionable, 0) AS is_actionable,
+               COALESCE(a.recommended_action, 'review') AS recommended_action,
+               a.thread_id IS NOT NULL AS analysis_available,
+               COALESCE(j.status = 'failed', 0) AS triage_failed,
+               COALESCE(j.last_error, '') AS triage_error
+        FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN messages m ON m.thread_id = t.id
+            AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
+        LEFT JOIN email_reviews r ON r.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
+        WHERE t.id = ? AND t.account_id = ? AND t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+          AND r.thread_id IS NULL
+          AND (? = 0 OR a.thread_id IS NOT NULL OR j.status = 'failed')
+        "#,
+    )
+    .bind(thread_id)
+    .bind(account_id)
+    .bind(if ai_assistance_enabled { 1 } else { 0 })
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Explicitly requeue a terminal local-analysis failure. The worker owns all
@@ -1225,19 +1301,43 @@ pub async fn retry_failed_triage(
 
 async fn review_queue_for_pool(
     pool: &SqlitePool,
+    account_id: &str,
     limit: Option<i64>,
     sort: Option<String>,
-) -> Result<Vec<ReviewItem>, String> {
+    offset: Option<i64>,
+) -> Result<ReviewQueuePage, String> {
     let ai_assistance_enabled = configured_ai_assistance(pool).await?.enabled;
     let limit = limit.unwrap_or(50).clamp(1, 100);
+    let offset = offset.unwrap_or(0).max(0);
     let order_by = match sort.as_deref() {
-        Some("oldest") => "t.last_message_at ASC",
-        Some("newest") => "t.last_message_at DESC",
+        Some("oldest") => "t.last_message_at ASC, t.id ASC",
+        Some("newest") => "t.last_message_at DESC, t.id DESC",
         _ if ai_assistance_enabled => {
-            "CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END DESC, a.importance DESC, t.last_message_at DESC"
+            "CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END DESC, a.importance DESC, t.last_message_at DESC, t.id DESC"
         }
-        _ => "t.last_message_at DESC",
+        _ => "t.last_message_at DESC, t.id DESC",
     };
+    let visibility_filter = r#"
+        t.account_id = ?
+          AND t.folder = 'inbox' AND t.archived = 0
+          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
+          AND r.thread_id IS NULL
+          AND (? = 0 OR a.thread_id IS NOT NULL OR j.status = 'failed')
+    "#;
+    let count_query = format!(r#"
+        SELECT COUNT(*)
+        FROM threads t
+        LEFT JOIN email_analysis a ON a.thread_id = t.id
+        LEFT JOIN email_reviews r ON r.thread_id = t.id
+        LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
+        WHERE {visibility_filter}
+    "#);
+    let total: i64 = sqlx::query_scalar(&count_query)
+        .bind(account_id)
+        .bind(if ai_assistance_enabled { 1 } else { 0 })
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let query = r#"
         SELECT t.id AS thread_id, t.id, t.account_id, t.subject, t.snippet, t.unread,
                t.starred, t.archived, t.last_message_at, t.label_ids, t.folder,
@@ -1259,21 +1359,24 @@ async fn review_queue_for_pool(
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
         LEFT JOIN email_reviews r ON r.thread_id = t.id
         LEFT JOIN background_triage_jobs j ON j.thread_id = t.id
-        WHERE t.folder = 'inbox' AND t.archived = 0
-          AND NOT EXISTS (SELECT 1 FROM mail_operations o WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress'))
-          AND r.thread_id IS NULL
-          AND (? = 0 OR a.thread_id IS NOT NULL OR j.status = 'failed')
+        WHERE {visibility_filter}
         ORDER BY {order_by}
-        LIMIT ?
+        LIMIT ? OFFSET ?
         "#
-        .replace("{order_by}", order_by);
+        .replace("{order_by}", order_by)
+        .replace("{visibility_filter}", visibility_filter);
 
-    sqlx::query_as::<_, ReviewItem>(&query)
+    let items = sqlx::query_as::<_, ReviewItem>(&query)
+        .bind(account_id)
         .bind(if ai_assistance_enabled { 1 } else { 0 })
         .bind(limit)
+        .bind(offset)
         .fetch_all(pool)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let next_offset = (offset + (items.len() as i64) < total)
+        .then_some(offset + items.len() as i64);
+    Ok(ReviewQueuePage { items, total, next_offset })
 }
 
 #[tauri::command]
@@ -1365,6 +1468,7 @@ async fn complete_follow_up_for_thread(pool: &SqlitePool, thread_id: &str) -> Re
 #[tauri::command]
 pub async fn get_follow_ups(
     pool: tauri::State<'_, SqlitePool>,
+    account_id: String,
 ) -> Result<Vec<FollowUpItem>, String> {
     sqlx::query_as::<_, FollowUpItem>(
         r#"
@@ -1381,7 +1485,7 @@ pub async fn get_follow_ups(
         LEFT JOIN email_analysis a ON a.thread_id = t.id
         LEFT JOIN messages m ON m.thread_id = t.id
             AND m.sent_at = (SELECT MAX(sent_at) FROM messages WHERE thread_id = t.id)
-        WHERE f.status = 'active' AND t.archived = 0
+        WHERE f.status = 'active' AND t.account_id = ? AND t.archived = 0
           AND NOT EXISTS (
               SELECT 1 FROM mail_operations o
               WHERE o.thread_id = t.id AND o.status IN ('pending', 'in_progress')
@@ -1389,6 +1493,7 @@ pub async fn get_follow_ups(
         ORDER BY f.due_at ASC
         "#,
     )
+    .bind(account_id)
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())
@@ -1449,6 +1554,7 @@ pub async fn get_thread_analysis(
 mod action_contract_tests {
     use super::{
         background_analysis_candidates, background_analysis_pending_count,
+        background_analysis_pending_count_for_account,
         backlog_analysis_candidates, complete_follow_up_for_thread,
         enqueue_backlog_triage_candidates, review_queue_for_pool, save_review_decision,
         should_retry_without_calendar, system_prompt,
@@ -1646,7 +1752,7 @@ mod action_contract_tests {
     async fn backlog_batch_is_newest_first_account_scoped_and_read_only() {
         let db = TestDatabase::new().await;
         let now = Utc::now();
-        for index in 0..24 {
+        for index in 0..54 {
             let thread = format!("backlog-{index:02}");
             let message = format!("backlog-message-{index:02}");
             let timestamp = (now - Duration::minutes(index)).to_rfc3339();
@@ -1687,22 +1793,22 @@ mod action_contract_tests {
             .bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(now.to_rfc3339())
             .execute(&db.pool).await.unwrap();
 
-        let candidates = backlog_analysis_candidates(&db.pool, "account-1", 20)
+        let candidates = backlog_analysis_candidates(&db.pool, "account-1", 50)
             .await
             .unwrap();
-        assert_eq!(candidates.len(), 20);
+        assert_eq!(candidates.len(), 50);
         assert_eq!(candidates.first().unwrap().thread_id, "backlog-04");
-        assert_eq!(candidates.last().unwrap().thread_id, "backlog-23");
+        assert_eq!(candidates.last().unwrap().thread_id, "backlog-53");
         assert!(!candidates
             .iter()
             .any(|item| item.thread_id == "other-account-newest"));
 
-        let queued = enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now)
+        let queued = enqueue_backlog_triage_candidates(&db.pool, "account-1", 50, now)
             .await
             .unwrap();
-        assert_eq!(queued, 20);
+        assert_eq!(queued, 50);
         assert_eq!(
-            enqueue_backlog_triage_candidates(&db.pool, "account-1", 20, now)
+            enqueue_backlog_triage_candidates(&db.pool, "account-1", 50, now)
                 .await
                 .unwrap(),
             0,
@@ -1716,7 +1822,7 @@ mod action_contract_tests {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-        assert_eq!(jobs, 20);
+        assert_eq!(jobs, 50);
         assert_eq!(
             mail_operations, 1,
             "backlog selection must not create Gmail operations"
@@ -1755,15 +1861,64 @@ mod action_contract_tests {
             .unwrap();
         }
 
-        let rows = review_queue_for_pool(&db.pool, Some(50), Some("newest".to_string()))
+        let page = review_queue_for_pool(&db.pool, "account-1", Some(50), Some("newest".to_string()), Some(0))
             .await
             .unwrap();
+        let rows = page.items;
         assert_eq!(
             rows.iter()
                 .map(|row| row.thread_id.as_str())
                 .collect::<Vec<_>>(),
             ["review-today", "review-older"]
         );
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn review_queue_pages_are_account_scoped_and_report_the_full_total() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        for index in 0..3 {
+            let thread_id = format!("review-page-{index}");
+            db.seed_thread(&thread_id).await;
+            sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = ?")
+                .bind((now - Duration::minutes(index)).to_rfc3339())
+                .bind(&thread_id)
+                .execute(&db.pool).await.unwrap();
+            sqlx::query("INSERT INTO email_analysis (thread_id, importance, analyzed_at) VALUES (?, 3, ?)")
+                .bind(&thread_id).bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+        }
+        db.seed_account("account-2", "other@example.com").await;
+        db.seed_thread_for_account("other-review", "account-2").await;
+        sqlx::query("INSERT INTO email_analysis (thread_id, importance, analyzed_at) VALUES ('other-review', 5, ?)")
+            .bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+
+        let first = review_queue_for_pool(&db.pool, "account-1", Some(2), Some("newest".to_string()), Some(0)).await.unwrap();
+        assert_eq!(first.total, 3);
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.next_offset, Some(2));
+        let second = review_queue_for_pool(&db.pool, "account-1", Some(2), Some("newest".to_string()), first.next_offset).await.unwrap();
+        assert_eq!(second.total, 3);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.next_offset, None);
+        assert!(first.items.iter().chain(second.items.iter()).all(|item| item.account_id == "account-1"));
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_count_is_account_scoped() {
+        let db = TestDatabase::new().await;
+        let now = Utc::now();
+        db.seed_thread("account-one-ready").await;
+        sqlx::query("INSERT INTO email_analysis (thread_id, analyzed_at) VALUES ('account-one-ready', ?)")
+            .bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+        db.seed_account("account-2", "other@example.com").await;
+        db.seed_thread_for_account("account-two-pending", "account-2").await;
+        sqlx::query("UPDATE threads SET last_message_at = ? WHERE id = 'account-two-pending'")
+            .bind(now.to_rfc3339()).execute(&db.pool).await.unwrap();
+
+        assert_eq!(background_analysis_pending_count_for_account(&db.pool, now - Duration::days(7), Some("account-1")).await.unwrap(), 0);
+        assert_eq!(background_analysis_pending_count_for_account(&db.pool, now - Duration::days(7), Some("account-2")).await.unwrap(), 1);
         db.close().await;
     }
 
@@ -1785,9 +1940,10 @@ mod action_contract_tests {
         .await
         .unwrap();
 
-        let rows = review_queue_for_pool(&db.pool, Some(50), Some("priority".to_string()))
+        let page = review_queue_for_pool(&db.pool, "account-1", Some(50), Some("priority".to_string()), Some(0))
             .await
             .unwrap();
+        let rows = page.items;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].thread_id, "failed-triage");
         assert!(!rows[0].analysis_available);
